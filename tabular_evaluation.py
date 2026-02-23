@@ -192,7 +192,7 @@ def load_data(args) -> tuple[pd.DataFrame, object]:
         modality=args.sdv_modality,
         dataset_name=args.sdv_dataset,
     )
-    print(metadata)
+    #print(metadata)
     if args.quiet is False:
         print(f"Loaded SDV demo '{args.sdv_dataset}': {len(data)} rows (metadata included)")
     return data, metadata
@@ -216,15 +216,45 @@ def run(args) -> dict:
             f"clean_data has {len(clean_data)} rows; cannot create test set of {args.test_size}."
         )
 
+    # For numerical stratify column: bin first (train_test_split requires ≥2 per class)
+    stratify_col = args.stratify_column
+    if pd.api.types.is_numeric_dtype(clean_data[stratify_col]):
+        clean_data = clean_data.copy()
+        n_bins = min(5, clean_data[stratify_col].nunique(), len(clean_data) // 2)
+        for attempt in range(n_bins, 1, -1):
+            try:
+                clean_data["_stratify_bins"] = pd.qcut(
+                    clean_data[stratify_col], q=attempt, labels=False, duplicates="drop"
+                )
+                min_per_bin = clean_data["_stratify_bins"].value_counts().min()
+                if min_per_bin >= 2:
+                    break
+            except (ValueError, TypeError):
+                continue
+        else:
+            raise ValueError(
+                "Cannot stratify on numerical column: too few samples per bin "
+                "(try fewer subsample sizes or a different stratify column)."
+            )
+        stratify_vals = clean_data["_stratify_bins"]
+        drop_bins = True
+    else:
+        stratify_vals = clean_data[stratify_col]
+        drop_bins = False
+
     train_data, test_data = train_test_split(
         clean_data,
         test_size=args.test_size,
-        stratify=clean_data[args.stratify_column],
+        stratify=stratify_vals,
         random_state=args.random_state,
     )
 
     if args.quiet is False:
         print(f"Created test set: {len(test_data)} samples")
+
+    stratify_for_subsample = (
+        train_data["_stratify_bins"] if drop_bins else train_data[stratify_col]
+    )
 
     stratified_subsamples = {}
     for size in subsample_sizes:
@@ -235,12 +265,22 @@ def run(args) -> dict:
         _, subsample = train_test_split(
             train_data,
             test_size=size / len(train_data),
-            stratify=train_data[args.stratify_column],
+            stratify=stratify_for_subsample,
             random_state=args.random_state,
         )
         stratified_subsamples[f"subsample_{size}"] = subsample
         if args.quiet is False:
             print(f"Generated subsample_{size}: {len(subsample)} rows")
+
+    # Cleanup: remove bin column if we used numerical stratification
+    if drop_bins:
+        clean_data = clean_data.drop(columns=["_stratify_bins"])
+        train_data = train_data.drop(columns=["_stratify_bins"])
+        test_data = test_data.drop(columns=["_stratify_bins"])
+        for name in list(stratified_subsamples.keys()):
+            stratified_subsamples[name] = stratified_subsamples[name].drop(
+                columns=["_stratify_bins"]
+            )
 
     result = {
         "clean_data": clean_data,
@@ -359,7 +399,7 @@ def _generate_comparative_plots(
     dataset_name: str,
     quiet: bool,
 ) -> None:
-    """Generate comparative plots per column: subsamples only. Bar for categorical, KDE for numerical."""
+    """Generate comparative plots per column: subsamples only. Bar (percentage) for categorical, box plot for numerical."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -386,11 +426,30 @@ def _generate_comparative_plots(
             is_num = _is_numeric(clean_data[col])
 
             if is_num:
-                # KDE for numerical (subsamples only)
+                # Box plot for numerical (subsamples only) - compares median, quartiles, spread
+                parts = []
                 for name, df in real_sources.items():
                     vals = df[col].dropna()
                     if len(vals) > 0:
-                        sns.kdeplot(x=vals, ax=ax, label=name, fill=True, alpha=0.5, common_norm=False)
+                        parts.append(pd.DataFrame({"Subsample": name, col: vals.values}))
+                if not parts:
+                    plt.close()
+                    continue
+                plot_df = pd.concat(parts, ignore_index=True)
+                subsample_order = list(real_sources.keys())
+                sns.boxplot(
+                    data=plot_df,
+                    x="Subsample",
+                    y=col,
+                    hue="Subsample",
+                    order=subsample_order,
+                    hue_order=subsample_order,
+                    ax=ax,
+                    palette="viridis",
+                    legend=False,
+                )
+                plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+                ax.set_ylabel(col)
             else:
                 # Bar plot for categorical (subsamples only)
                 all_cats = pd.Index(clean_data[col].dropna().unique())
@@ -422,9 +481,9 @@ def _generate_comparative_plots(
                 ax.set_xticks(x)
                 ax.set_xticklabels(cat_order, rotation=45, ha="right")
                 ax.set_ylabel("Percentage (%)")
+                ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
 
             ax.set_title(f"Comparative: {col}")
-            ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
             plt.tight_layout()
             safe_name = str(col).replace(" ", "_").replace("/", "_")
             fig.savefig(comparative_dir / f"{safe_name}.png", dpi=100, bbox_inches="tight")
@@ -468,13 +527,6 @@ def _generate_eval_visualizations(
     k_synth = len(synthetic_list)
     show_std = k_synth > 1
 
-    # Combined dataframe for pair plots (real + first synthetic to avoid K× inflation)
-    real_m = real_data.copy()
-    real_m["_Source"] = "Real"
-    synth_first = synthetic_list[0].copy()
-    synth_first["_Source"] = "Synthetic"
-    combined = pd.concat([real_m, synth_first], ignore_index=True)
-
     # Single-column: distribution comparison
     for col in cols:
         try:
@@ -487,7 +539,7 @@ def _generate_eval_visualizations(
                 combined_num = pd.concat([real_m, synth_all], ignore_index=True)
                 sns.kdeplot(
                     data=combined_num, x=col, hue="_Source", common_norm=False,
-                    ax=ax, alpha=0.6, fill=True
+                    ax=ax, alpha=0.6, fill=True, warn_singular=False
                 )
             else:
                 # Categorical: compute mean and std across K synthetic runs
@@ -527,41 +579,6 @@ def _generate_eval_visualizations(
         except Exception as e:
             if not quiet:
                 print(f"    Skip column plot '{col}': {e}")
-
-    # Pair plots: stratify_column vs each other column
-    if stratify_column and stratify_column in cols:
-        others = [c for c in cols if c != stratify_column]
-        sample_size = min(500, len(combined))
-        plot_df = combined.sample(n=sample_size, random_state=42) if len(combined) > sample_size else combined
-        for other in others:
-            try:
-                if _is_numeric(real_data[other]):
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    sns.boxplot(
-                        data=plot_df, x=stratify_column, y=other, hue="_Source",
-                        ax=ax
-                    )
-                    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-                    ax.set_title(f"{stratify_column} vs {other} – Real vs Synthetic")
-                    plt.tight_layout()
-                else:
-                    g = sns.catplot(
-                        data=plot_df, x=stratify_column, hue=other, col="_Source",
-                        kind="count", height=4, aspect=1.2, legend_out=True
-                    )
-                    g.fig.suptitle(f"{stratify_column} vs {other} – Real vs Synthetic", y=1.02)
-                    for ax in g.axes.flat:
-                        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-                    fig = g.fig
-                    plt.tight_layout()
-                safe_name = f"pair_{stratify_column}_vs_{other}".replace(" ", "_")
-                fig.savefig(plot_dir / f"{safe_name}.{ext}", dpi=100, bbox_inches="tight")
-                plt.close()
-            except Exception as e:
-                if not quiet:
-                    print(f"    Skip pair plot ({stratify_column}, {other}): {e}")
-            finally:
-                plt.close("all")
 
 
 def _prepare_ml_augmentation_data(
@@ -615,6 +632,11 @@ def _compute_ml_augmentation_metrics(
     except ImportError as e:
         if not quiet:
             print(f"  Skipping ML augmentation eval: {e} (install xgboost: pip install xgboost)")
+        return {}
+
+    if pd.api.types.is_numeric_dtype(real_validation_data[prediction_column]):
+        if not quiet:
+            print("  Skipping ML augmentation eval: target variable is numerical (binary classifier requires categorical target).")
         return {}
 
     # Get metadata as dict (SingleTableMetadata format)
