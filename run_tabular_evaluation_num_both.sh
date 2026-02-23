@@ -8,10 +8,10 @@ DATA_SOURCE="--sdv-demo"
 
 # SDV options (when using --sdv-demo)
 SDV_MODALITY="single_table"
-SDV_DATASET="child"
+SDV_DATASET="census"
 
 # Stratification & split (test set is held out and used as ML validation for --eval-ml-augmentation)
-STRATIFY_COLUMN="Disease"
+STRATIFY_COLUMN="label"
 TEST_SIZE=1000
 SUBSAMPLE_SIZES="400,200"
 RANDOM_STATE=42
@@ -28,8 +28,8 @@ EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (c
 EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
 EVAL_K_RUNS="--eval-k-runs 5"   # K training runs per subsample (saves *_synthetic_run0.csv, run1.csv, etc.); use with EVAL_ML_AUGMENTATION for mean±std
-PREDICTION_COLUMN="--prediction-column Sick"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
-MINORITY_CLASS="--minority-class-label yes"   # add "--minority-class-label Fallot" (or other class from prediction column)
+PREDICTION_COLUMN="--prediction-column label"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
+MINORITY_CLASS="--minority-class-label 50000+"   # add "--minority-class-label Fallot" (or other class from prediction column)
 SYNTHESIZER_EPOCHS="--synthesizer-epochs 100"           # for CTGAN/TVAE only
 QUIET=""              # add "-q" to reduce verbosity
 

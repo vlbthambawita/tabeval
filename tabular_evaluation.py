@@ -6,6 +6,8 @@ Creates stratified train/test split and subsamples from tabular data.
 All parameters can be set via command-line arguments.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 import warnings
@@ -190,6 +192,7 @@ def load_data(args) -> tuple[pd.DataFrame, object]:
         modality=args.sdv_modality,
         dataset_name=args.sdv_dataset,
     )
+    print(metadata)
     if args.quiet is False:
         print(f"Loaded SDV demo '{args.sdv_dataset}': {len(data)} rows (metadata included)")
     return data, metadata
@@ -248,16 +251,18 @@ def run(args) -> dict:
 
     if args.save_datasets:
         out = args.output_dir.resolve()
-        out.mkdir(parents=True, exist_ok=True)
+        dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
+        out_ds = out / dataset_name
+        out_ds.mkdir(parents=True, exist_ok=True)
 
-        test_data.to_csv(out / "test_data.csv", index=False)
-        train_data.to_csv(out / "train_data.csv", index=False)
+        test_data.to_csv(out_ds / "test_data.csv", index=False)
+        train_data.to_csv(out_ds / "train_data.csv", index=False)
 
         for name, df in stratified_subsamples.items():
-            df.to_csv(out / f"{name}.csv", index=False)
+            df.to_csv(out_ds / f"{name}.csv", index=False)
 
         if args.quiet is False:
-            print(f"Saved datasets to {out}")
+            print(f"Saved datasets to {out_ds}")
 
     if not args.no_plots:
         try:
@@ -297,52 +302,16 @@ def run(args) -> dict:
             if args.quiet is False:
                 print("Skipping plots: matplotlib/seaborn not installed")
 
-    if args.comparative_plots and not args.no_plots:
-        try:
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-
-            dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
-            out = args.output_dir.resolve()
-            out.mkdir(parents=True, exist_ok=True)
-            comparative_dir = out / "plots" / dataset_name / "comparative"
-            comparative_dir.mkdir(parents=True, exist_ok=True)
-
-            all_datasets = {"clean_data": clean_data, **stratified_subsamples}
-
-            for col in clean_data.columns:
-                plot_data_list = []
-                for name, df in all_datasets.items():
-                    value_counts = df[col].value_counts(normalize=True).reset_index()
-                    value_counts.columns = ["Category", "Proportion"]
-                    value_counts["Source"] = name
-                    plot_data_list.append(value_counts)
-
-                combined_df = pd.concat(plot_data_list, ignore_index=True)
-
-                fig, ax = plt.subplots(figsize=(12, 6))
-                sns.barplot(
-                    data=combined_df,
-                    x="Category",
-                    y="Proportion",
-                    hue="Source",
-                    palette="viridis",
-                    ax=ax,
-                )
-                ax.set_title(f"Comparative Distribution of {col} Across Datasets", fontsize=16)
-                ax.set_xlabel("Category", fontsize=12)
-                ax.set_ylabel("Proportion", fontsize=12)
-                plt.xticks(rotation=45, ha="right")
-                plt.legend(title="Dataset Source")
-                plt.tight_layout()
-                plt.savefig(comparative_dir / f"{col}.png", dpi=100)
-                plt.close()
-
-            if args.quiet is False:
-                print(f"Saved comparative plots to {comparative_dir}")
-        except ImportError:
-            if args.quiet is False:
-                print("Skipping comparative plots: matplotlib/seaborn not installed")
+    if args.comparative_plots and not args.no_plots and not args.train_synthesizer:
+        dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
+        _generate_comparative_plots(
+            clean_data=clean_data,
+            stratified_subsamples=stratified_subsamples,
+            synthetic_by_subsample={},
+            output_dir=args.output_dir,
+            dataset_name=dataset_name,
+            quiet=args.quiet,
+        )
 
     if args.train_synthesizer:
         dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
@@ -362,7 +331,9 @@ def run(args) -> dict:
             quiet=args.quiet,
             base_metadata=base_metadata,
             dataset_name=dataset_name,
+            clean_data=clean_data,
             eval_visualizations=args.eval_visualizations,
+            comparative_plots=args.comparative_plots and not args.no_plots,
             stratify_column=args.stratify_column,
             eval_plot_format=args.eval_plot_format,
             eval_ml_augmentation=args.eval_ml_augmentation,
@@ -378,6 +349,92 @@ def run(args) -> dict:
 def _is_numeric(series: pd.Series) -> bool:
     """Check if column is numeric (int, float)."""
     return pd.api.types.is_numeric_dtype(series)
+
+
+def _generate_comparative_plots(
+    clean_data: pd.DataFrame,
+    stratified_subsamples: dict,
+    synthetic_by_subsample: dict,
+    output_dir: Path,
+    dataset_name: str,
+    quiet: bool,
+) -> None:
+    """Generate comparative plots per column: subsamples only. Bar for categorical, KDE for numerical."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import seaborn as sns
+        plt.rcParams["figure.max_open_warning"] = 0
+    except ImportError as e:
+        if not quiet:
+            print(f"Skipping comparative plots: {e}")
+        return
+
+    out = output_dir.resolve()
+    comparative_dir = out / "plots" / dataset_name / "comparative"
+    comparative_dir.mkdir(parents=True, exist_ok=True)
+
+    # Comparative plots show only subsamples (no clean_data, no synthetic)
+    real_sources = dict(stratified_subsamples)
+    cols = list(clean_data.columns)
+
+    for col in cols:
+        try:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            is_num = _is_numeric(clean_data[col])
+
+            if is_num:
+                # KDE for numerical (subsamples only)
+                for name, df in real_sources.items():
+                    vals = df[col].dropna()
+                    if len(vals) > 0:
+                        sns.kdeplot(x=vals, ax=ax, label=name, fill=True, alpha=0.5, common_norm=False)
+            else:
+                # Bar plot for categorical (subsamples only)
+                all_cats = pd.Index(clean_data[col].dropna().unique())
+                for df in stratified_subsamples.values():
+                    all_cats = all_cats.union(pd.Index(df[col].dropna().unique()))
+                cat_order = list(all_cats)
+                n_cats = len(cat_order)
+                if n_cats == 0:
+                    continue
+
+                real_counts = {name: df[col].value_counts().reindex(cat_order, fill_value=0).fillna(0).values
+                              for name, df in real_sources.items()}
+                # Convert to percentages
+                real_pct = {name: 100 * vals / vals.sum() if vals.sum() > 0 else vals
+                            for name, vals in real_counts.items()}
+                n_sources = len(real_sources)
+                width = 0.8 / max(n_sources, 1)
+                x = np.arange(n_cats)
+                cmap = plt.get_cmap("viridis")
+                colors = cmap(np.linspace(0, 1, n_sources))
+
+                for idx, (name, pct) in enumerate(real_pct.items()):
+                    offset = (idx - n_sources / 2 + 0.5) * width
+                    ax.bar(x + offset, pct, width, label=name, alpha=0.9, color=colors[idx])
+                    y_max = max(pct)
+                    for i, v in enumerate(pct):
+                        ax.text(x[i] + offset, v + 0.02 * max(y_max, 1), f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
+
+                ax.set_xticks(x)
+                ax.set_xticklabels(cat_order, rotation=45, ha="right")
+                ax.set_ylabel("Percentage (%)")
+
+            ax.set_title(f"Comparative: {col}")
+            ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+            plt.tight_layout()
+            safe_name = str(col).replace(" ", "_").replace("/", "_")
+            fig.savefig(comparative_dir / f"{safe_name}.png", dpi=100, bbox_inches="tight")
+            plt.close()
+        except Exception as e:
+            if not quiet:
+                print(f"  Skip comparative plot '{col}': {e}")
+
+    if not quiet:
+        print(f"Saved comparative plots to {comparative_dir}")
 
 
 def _generate_eval_visualizations(
@@ -427,10 +484,10 @@ def _generate_eval_visualizations(
                 real_m["_Source"] = "Real"
                 synth_all = pd.concat([s.copy() for s in synthetic_list], ignore_index=True)
                 synth_all["_Source"] = "Synthetic"
-                combined = pd.concat([real_m, synth_all], ignore_index=True)
-                sns.histplot(
-                    data=combined, x=col, hue="_Source", multiple="layer", kde=True,
-                    ax=ax, alpha=0.6, common_norm=False
+                combined_num = pd.concat([real_m, synth_all], ignore_index=True)
+                sns.kdeplot(
+                    data=combined_num, x=col, hue="_Source", common_norm=False,
+                    ax=ax, alpha=0.6, fill=True
                 )
             else:
                 # Categorical: compute mean and std across K synthetic runs
@@ -507,6 +564,39 @@ def _generate_eval_visualizations(
                 plt.close("all")
 
 
+def _prepare_ml_augmentation_data(
+    real_training_data: pd.DataFrame,
+    synthetic_data: pd.DataFrame,
+    real_validation_data: pd.DataFrame,
+):
+    """Filter validation for seen categories and convert object columns to category.
+    XGBoost requires int/float/bool/category (not object)."""
+    train_plus_synth = pd.concat([real_training_data, synthetic_data], ignore_index=True)
+    mask = pd.Series(True, index=real_validation_data.index)
+    for col in real_validation_data.columns:
+        if not pd.api.types.is_numeric_dtype(real_validation_data[col]):
+            seen = set(train_plus_synth[col].dropna().astype(str).unique())
+            mask &= real_validation_data[col].apply(
+                lambda v: pd.isna(v) or str(v) in seen
+            )
+    val_filtered = real_validation_data.loc[mask].copy()
+
+    def _object_to_category(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        for col in out.columns:
+            if out[col].dtype == "object" or (
+                hasattr(out[col].dtype, "name") and "str" in str(out[col].dtype)
+            ):
+                out[col] = out[col].astype("category")
+        return out
+
+    return (
+        _object_to_category(real_training_data),
+        _object_to_category(synthetic_data),
+        _object_to_category(val_filtered),
+    )
+
+
 def _compute_ml_augmentation_metrics(
     real_training_data: pd.DataFrame,
     synthetic_list: list[pd.DataFrame],
@@ -537,10 +627,17 @@ def _compute_ml_augmentation_metrics(
     recall_scores = []
     for syn in synthetic_list:
         try:
+            train_prep, syn_prep, val_prep = _prepare_ml_augmentation_data(
+                real_training_data, syn, real_validation_data
+            )
+            if len(val_prep) < 10:
+                if not quiet:
+                    print("    Metric skipped: validation set too small after filtering unseen categories")
+                continue
             prec = BinaryClassifierPrecisionEfficacy.compute(
-                real_training_data=real_training_data,
-                synthetic_data=syn,
-                real_validation_data=real_validation_data,
+                real_training_data=train_prep,
+                synthetic_data=syn_prep,
+                real_validation_data=val_prep,
                 metadata=meta_dict,
                 prediction_column_name=prediction_column,
                 minority_class_label=minority_class_label,
@@ -548,9 +645,9 @@ def _compute_ml_augmentation_metrics(
                 fixed_recall_value=0.9,
             )
             rec = BinaryClassifierRecallEfficacy.compute(
-                real_training_data=real_training_data,
-                synthetic_data=syn,
-                real_validation_data=real_validation_data,
+                real_training_data=train_prep,
+                synthetic_data=syn_prep,
+                real_validation_data=val_prep,
                 metadata=meta_dict,
                 prediction_column_name=prediction_column,
                 minority_class_label=minority_class_label,
@@ -590,7 +687,9 @@ def _train_synthesizers(
     quiet: bool,
     base_metadata: object = None,
     dataset_name: str = "data",
+    clean_data: pd.DataFrame | None = None,
     eval_visualizations: bool = False,
+    comparative_plots: bool = False,
     stratify_column: str | None = None,
     eval_plot_format: str = "pdf",
     eval_ml_augmentation: bool = False,
@@ -626,6 +725,7 @@ def _train_synthesizers(
 
     k_runs = max(1, eval_k_runs)
     ml_results = {}
+    synthetic_by_subsample = {}
 
     # Suppress SDV's "save metadata" UserWarning since we save it ourselves below
     with warnings.catch_warnings():
@@ -692,6 +792,19 @@ def _train_synthesizers(
                     if quiet is False:
                         for m, v in metrics.items():
                             print(f"    {m}: {v['mean']:.4f} ± {v['std']:.4f}")
+
+            if comparative_plots and synthetic_list:
+                synthetic_by_subsample[name] = synthetic_list
+
+    if comparative_plots and (clean_data is not None or stratified_subsamples):
+        _generate_comparative_plots(
+            clean_data=clean_data if clean_data is not None else next(iter(stratified_subsamples.values())),
+            stratified_subsamples=stratified_subsamples,
+            synthetic_by_subsample=synthetic_by_subsample,
+            output_dir=output_dir,
+            dataset_name=dataset_name,
+            quiet=quiet,
+        )
 
     if ml_results:
         import json
