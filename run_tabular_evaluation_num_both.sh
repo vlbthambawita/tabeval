@@ -27,6 +27,7 @@ SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/s
 EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (column + pair) per subsample
 EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
+ML_LABEL_ENCODE="--ml-label-encode"   # add to fix XGBoost "enable_categorical" error with many categorical features (e.g. census)
 EVAL_K_RUNS="--eval-k-runs 5"   # K training runs per subsample (saves *_synthetic_run0.csv, run1.csv, etc.); use with EVAL_ML_AUGMENTATION for mean±std
 PREDICTION_COLUMN="--prediction-column label"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
 MINORITY_CLASS="--minority-class-label 50000+"   # add "--minority-class-label Fallot" (or other class from prediction column)
@@ -53,6 +54,7 @@ python3 tabular_evaluation.py \
   $EVAL_VISUALIZATIONS \
   $EVAL_PLOT_FORMAT \
   $EVAL_ML_AUGMENTATION \
+  $ML_LABEL_ENCODE \
   $EVAL_K_RUNS \
   $PREDICTION_COLUMN \
   $MINORITY_CLASS \

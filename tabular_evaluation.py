@@ -146,6 +146,11 @@ def parse_args():
         default=None,
         help="Positive/minority class value for binary metrics (e.g. 'Fallot' for Disease column). Required with --eval-ml-augmentation.",
     )
+    parser.add_argument(
+        "--ml-label-encode",
+        action="store_true",
+        help="Label-encode categorical columns to int before ML augmentation (fixes XGBoost 'enable_categorical' error with many categorical features).",
+    )
 
     # Misc
     parser.add_argument(
@@ -381,6 +386,7 @@ def run(args) -> dict:
             test_data=test_data,
             prediction_column=pred_col,
             minority_class_label=args.minority_class_label,
+            eval_ml_label_encode=args.ml_label_encode,
         )
 
     return result
@@ -585,9 +591,14 @@ def _prepare_ml_augmentation_data(
     real_training_data: pd.DataFrame,
     synthetic_data: pd.DataFrame,
     real_validation_data: pd.DataFrame,
-):
+    prediction_column: str | None = None,
+    minority_class_label: str | int | None = None,
+    ml_label_encode: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str | int]:
     """Filter validation for seen categories and convert object columns to category.
-    XGBoost requires int/float/bool/category (not object)."""
+    XGBoost requires int/float/bool/category (not object).
+    When ml_label_encode=True, label-encode categorical columns to int to avoid XGBoost enable_categorical error.
+    Returns (train, synth, val, effective_minority_class_label)."""
     train_plus_synth = pd.concat([real_training_data, synthetic_data], ignore_index=True)
     mask = pd.Series(True, index=real_validation_data.index)
     for col in real_validation_data.columns:
@@ -607,11 +618,64 @@ def _prepare_ml_augmentation_data(
                 out[col] = out[col].astype("category")
         return out
 
-    return (
-        _object_to_category(real_training_data),
-        _object_to_category(synthetic_data),
-        _object_to_category(val_filtered),
-    )
+    train_prep = _object_to_category(real_training_data)
+    syn_prep = _object_to_category(synthetic_data)
+    val_prep = _object_to_category(val_filtered)
+    effective_minority = minority_class_label
+
+    if ml_label_encode:
+        try:
+            from sklearn.preprocessing import OrdinalEncoder
+        except ImportError:
+            return (train_prep, syn_prep, val_prep, effective_minority)
+        cat_cols = [
+            c for c in train_prep.columns
+            if not pd.api.types.is_numeric_dtype(train_prep[c])
+        ]
+        if not cat_cols:
+            return (train_prep, syn_prep, val_prep, effective_minority)
+        train_prep = train_prep.copy()
+        syn_prep = syn_prep.copy()
+        val_prep = val_prep.copy()
+        pred_enc = None
+        for c in cat_cols:
+            combined = pd.concat([train_prep[c], syn_prep[c]], ignore_index=True)
+            enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+            enc.fit(combined.astype(str).fillna("__nan__").values.reshape(-1, 1))
+            tr_vals = train_prep[c].astype(str).fillna("__nan__").values.reshape(-1, 1)
+            sy_vals = syn_prep[c].astype(str).fillna("__nan__").values.reshape(-1, 1)
+            va_vals = val_prep[c].astype(str).fillna("__nan__").values.reshape(-1, 1)
+            train_prep[c] = enc.transform(tr_vals).ravel().astype(int)
+            syn_prep[c] = enc.transform(sy_vals).ravel().astype(int)
+            val_prep[c] = enc.transform(va_vals).ravel().astype(int)
+            if c == prediction_column:
+                pred_enc = enc
+        if pred_enc is not None and minority_class_label is not None:
+            lab_encoded = pred_enc.transform([[str(minority_class_label)]])
+            effective_minority = int(lab_encoded[0, 0])
+        # Ensure consistent dtypes: encoded categoricals as int64, numerics as float64
+        # (XGBoost rejects float for category indices)
+        for df in (train_prep, syn_prep, val_prep):
+            for c in cat_cols:
+                df[c] = df[c].astype("int64")
+            for c in df.columns:
+                if c not in cat_cols:
+                    df[c] = df[c].astype("float64")
+
+    return (train_prep, syn_prep, val_prep, effective_minority)
+
+
+def _metadata_for_label_encoded(meta_dict: dict, cat_cols: list, prediction_column: str) -> dict:
+    """Return metadata copy with categorical columns (except target) as 'numerical'.
+    SDMetrics then treats them as numeric, avoiding astype('category') that causes
+    XGBoost 'index type must match' errors when train/synth/val have mixed int/float."""
+    import copy
+    out = copy.deepcopy(meta_dict)
+    cols = out.get("columns", {})
+    for c in cat_cols:
+        if c != prediction_column and c in cols:
+            cols[c] = {**cols[c], "sdtype": "numerical"}
+    return out
 
 
 def _compute_ml_augmentation_metrics(
@@ -621,7 +685,8 @@ def _compute_ml_augmentation_metrics(
     metadata: object,
     prediction_column: str,
     minority_class_label: str | int,
-    quiet: bool,
+    ml_label_encode: bool = False,
+    quiet: bool = False,
 ) -> dict:
     """Compute BinaryClassifierPrecisionEfficacy and BinaryClassifierRecallEfficacy across K synthetic datasets. Returns mean±std."""
     try:
@@ -645,12 +710,22 @@ def _compute_ml_augmentation_metrics(
     else:
         meta_dict = metadata
 
+    # When label-encoding, pass metadata with encoded categorical cols as "numerical"
+    # so SDMetrics does not astype('category'), avoiding XGBoost dtype mismatch.
+    if ml_label_encode:
+        cat_cols = [c for c in real_training_data.columns
+                    if not pd.api.types.is_numeric_dtype(real_training_data[c])]
+        meta_dict = _metadata_for_label_encoded(meta_dict, cat_cols, prediction_column)
+
     precision_scores = []
     recall_scores = []
     for syn in synthetic_list:
         try:
-            train_prep, syn_prep, val_prep = _prepare_ml_augmentation_data(
-                real_training_data, syn, real_validation_data
+            train_prep, syn_prep, val_prep, effective_minority = _prepare_ml_augmentation_data(
+                real_training_data, syn, real_validation_data,
+                prediction_column=prediction_column,
+                minority_class_label=minority_class_label,
+                ml_label_encode=ml_label_encode,
             )
             if len(val_prep) < 10:
                 if not quiet:
@@ -662,7 +737,7 @@ def _compute_ml_augmentation_metrics(
                 real_validation_data=val_prep,
                 metadata=meta_dict,
                 prediction_column_name=prediction_column,
-                minority_class_label=minority_class_label,
+                minority_class_label=effective_minority,
                 classifier="XGBoost",
                 fixed_recall_value=0.9,
             )
@@ -672,7 +747,7 @@ def _compute_ml_augmentation_metrics(
                 real_validation_data=val_prep,
                 metadata=meta_dict,
                 prediction_column_name=prediction_column,
-                minority_class_label=minority_class_label,
+                minority_class_label=effective_minority,
                 classifier="XGBoost",
                 fixed_precision_value=0.9,
             )
@@ -719,6 +794,7 @@ def _train_synthesizers(
     test_data: pd.DataFrame | None = None,
     prediction_column: str | None = None,
     minority_class_label: str | int | None = None,
+    eval_ml_label_encode: bool = False,
 ) -> None:
     """Train SDV synthesizer on each subsample and generate synthetic data of same size.
     When eval_ml_augmentation=True, trains K times per subsample and evaluates with mean±std."""
@@ -807,6 +883,7 @@ def _train_synthesizers(
                     metadata=metadata,
                     prediction_column=prediction_column,
                     minority_class_label=minority_class_label,
+                    ml_label_encode=eval_ml_label_encode,
                     quiet=quiet,
                 )
                 if metrics:
