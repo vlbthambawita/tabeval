@@ -112,6 +112,17 @@ def parse_args():
         default=100,
         help="Training epochs for CTGAN/TVAE (ignored for GaussianCopula).",
     )
+    parser.add_argument(
+        "--eval-visualizations",
+        action="store_true",
+        help="Generate Seaborn distribution comparison plots (real vs synthetic) for each subsample (use with --train-synthesizer).",
+    )
+    parser.add_argument(
+        "--eval-plot-format",
+        choices=["pdf", "png"],
+        default="pdf",
+        help="Format for eval plots: pdf or png.",
+    )
 
     # Misc
     parser.add_argument(
@@ -232,10 +243,11 @@ def run(args) -> dict:
             import matplotlib.pyplot as plt
             import seaborn as sns
 
+            dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
             out = args.output_dir.resolve()
             out.mkdir(parents=True, exist_ok=True)
-            plots_dir = out / "plots"
-            plots_dir.mkdir(exist_ok=True)
+            plots_dir = out / "plots" / dataset_name
+            plots_dir.mkdir(parents=True, exist_ok=True)
 
             for name, subsample_df in stratified_subsamples.items():
                 cols = list(subsample_df.columns)
@@ -246,10 +258,10 @@ def run(args) -> dict:
 
                 for i, col in enumerate(cols):
                     ax = axes[i]
-                    sns.countplot(data=subsample_df, x=col, ax=ax, palette="viridis")
+                    sns.countplot(data=subsample_df, x=col, hue=col, ax=ax, legend=False, palette="viridis")
                     ax.set_title(f"{col} in {name}")
                     ax.set_ylabel("Count")
-                    ax.tick_params(axis="x", rotation=45)
+                    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
                 for j in range(i + 1, len(axes)):
                     fig.delaxes(axes[j])
@@ -269,9 +281,10 @@ def run(args) -> dict:
             import matplotlib.pyplot as plt
             import seaborn as sns
 
+            dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
             out = args.output_dir.resolve()
             out.mkdir(parents=True, exist_ok=True)
-            comparative_dir = out / "plots" / "comparative"
+            comparative_dir = out / "plots" / dataset_name / "comparative"
             comparative_dir.mkdir(parents=True, exist_ok=True)
 
             all_datasets = {"clean_data": clean_data, **stratified_subsamples}
@@ -311,6 +324,7 @@ def run(args) -> dict:
                 print("Skipping comparative plots: matplotlib/seaborn not installed")
 
     if args.train_synthesizer:
+        dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
         _train_synthesizers(
             stratified_subsamples=stratified_subsamples,
             synthesizer_name=args.train_synthesizer,
@@ -320,9 +334,107 @@ def run(args) -> dict:
             random_state=args.random_state,
             quiet=args.quiet,
             base_metadata=base_metadata,
+            dataset_name=dataset_name,
+            eval_visualizations=args.eval_visualizations,
+            stratify_column=args.stratify_column,
+            eval_plot_format=args.eval_plot_format,
         )
 
     return result
+
+
+def _is_numeric(series: pd.Series) -> bool:
+    """Check if column is numeric (int, float)."""
+    return pd.api.types.is_numeric_dtype(series)
+
+
+def _generate_eval_visualizations(
+    real_data: pd.DataFrame,
+    synthetic_data: pd.DataFrame,
+    metadata: object,
+    output_dir: Path,
+    subsample_name: str,
+    stratify_column: str | None,
+    quiet: bool,
+    eval_plot_format: str = "pdf",
+) -> None:
+    """Generate Seaborn distribution comparison plots (real vs synthetic) per subsample."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        plt.rcParams["figure.max_open_warning"] = 0
+    except ImportError:
+        if not quiet:
+            print("  Skipping eval visualizations: matplotlib/seaborn not installed")
+        return
+
+    ext = eval_plot_format
+    cols = list(real_data.columns)
+    plot_dir = output_dir / "eval_plots" / subsample_name
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    real_m = real_data.copy()
+    real_m["_Source"] = "Real"
+    synth_m = synthetic_data.copy()
+    synth_m["_Source"] = "Synthetic"
+    combined = pd.concat([real_m, synth_m], ignore_index=True)
+
+    # Single-column: distribution comparison
+    for col in cols:
+        try:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            if _is_numeric(real_data[col]):
+                sns.histplot(
+                    data=combined, x=col, hue="_Source", multiple="layer", kde=True,
+                    ax=ax, alpha=0.6, common_norm=False
+                )
+            else:
+                counts = combined.groupby([col, "_Source"]).size().reset_index(name="count")
+                sns.barplot(data=counts, x=col, y="count", hue="_Source", ax=ax, alpha=0.9)
+                plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+            ax.set_title(f"{col} – Real vs Synthetic")
+            plt.tight_layout()
+            fig.savefig(plot_dir / f"column_{col}.{ext}", dpi=100, bbox_inches="tight")
+            plt.close()
+        except Exception as e:
+            if not quiet:
+                print(f"    Skip column plot '{col}': {e}")
+
+    # Pair plots: stratify_column vs each other column
+    if stratify_column and stratify_column in cols:
+        others = [c for c in cols if c != stratify_column]
+        sample_size = min(500, len(combined))
+        plot_df = combined.sample(n=sample_size, random_state=42) if len(combined) > sample_size else combined
+        for other in others:
+            try:
+                if _is_numeric(real_data[other]):
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    sns.boxplot(
+                        data=plot_df, x=stratify_column, y=other, hue="_Source",
+                        ax=ax
+                    )
+                    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+                    ax.set_title(f"{stratify_column} vs {other} – Real vs Synthetic")
+                    plt.tight_layout()
+                else:
+                    g = sns.catplot(
+                        data=plot_df, x=stratify_column, hue=other, col="_Source",
+                        kind="count", height=4, aspect=1.2, legend_out=True
+                    )
+                    g.fig.suptitle(f"{stratify_column} vs {other} – Real vs Synthetic", y=1.02)
+                    for ax in g.axes.flat:
+                        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+                    fig = g.fig
+                    plt.tight_layout()
+                safe_name = f"pair_{stratify_column}_vs_{other}".replace(" ", "_")
+                fig.savefig(plot_dir / f"{safe_name}.{ext}", dpi=100, bbox_inches="tight")
+                plt.close()
+            except Exception as e:
+                if not quiet:
+                    print(f"    Skip pair plot ({stratify_column}, {other}): {e}")
+            finally:
+                plt.close("all")
 
 
 def _train_synthesizers(
@@ -334,6 +446,10 @@ def _train_synthesizers(
     random_state: int,
     quiet: bool,
     base_metadata: object = None,
+    dataset_name: str = "data",
+    eval_visualizations: bool = False,
+    stratify_column: str | None = None,
+    eval_plot_format: str = "pdf",
 ) -> None:
     """Train SDV synthesizer on each subsample and generate synthetic data of same size."""
     try:
@@ -353,10 +469,8 @@ def _train_synthesizers(
         return TVAESynthesizer(metadata, epochs=epochs, verbose=not quiet)
 
     out = output_dir.resolve()
-    synthetic_dir = out / "synthetic"
+    synthetic_dir = out / "synthetic" / dataset_name / synthesizer_name
     synthetic_dir.mkdir(parents=True, exist_ok=True)
-    if save_synthetic:
-        (synthetic_dir / synthesizer_name).mkdir(exist_ok=True)
 
     if quiet is False:
         print(f"Training {synthesizer_name} on {len(stratified_subsamples)} subsamples...")
@@ -381,13 +495,26 @@ def _train_synthesizers(
             synthetic_data = synthesizer.sample(num_rows=n_rows)
 
             if save_synthetic:
-                synth_subdir = synthetic_dir / synthesizer_name
-                csv_path = synth_subdir / f"{name}_synthetic.csv"
+                csv_path = synthetic_dir / f"{name}_synthetic.csv"
                 synthetic_data.to_csv(csv_path, index=False)
-                metadata_path = synth_subdir / f"{name}_metadata.json"
+                metadata_path = synthetic_dir / f"{name}_metadata.json"
                 metadata.save_to_json(filepath=metadata_path, mode="overwrite")
                 if quiet is False:
                     print(f"  {name}: trained, sampled {n_rows} rows -> {csv_path}")
+
+            if eval_visualizations:
+                if quiet is False:
+                    print(f"  {name}: generating eval visualizations...")
+                _generate_eval_visualizations(
+                    real_data=subsample_df,
+                    synthetic_data=synthetic_data,
+                    metadata=metadata,
+                    output_dir=synthetic_dir,
+                    subsample_name=name,
+                    stratify_column=stratify_column,
+                    quiet=quiet,
+                    eval_plot_format=eval_plot_format,
+                )
 
     if quiet is False:
         print(f"Synthetic data saved to {synthetic_dir}")

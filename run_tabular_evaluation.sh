@@ -23,7 +23,9 @@ NO_PLOTS=""           # add "--no-plots" to skip bar plots
 COMPARATIVE_PLOTS="--comparative-plots"  # add to generate all-in-one comparative plots per column
 # Synthesizer: gaussian_copula (fast), ctgan, tvae (see https://docs.sdv.dev/sdv/single-table-data/modeling/synthesizers)
 TRAIN_SYNTHESIZER="--train-synthesizer gaussian_copula"  # set to "--train-synthesizer gaussian_copula" or "ctgan" or "tvae" to enable
-SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/synthetic/<synthesizer>/
+SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/synthetic/<dataset>/<synthesizer>/
+EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (column + pair) per subsample
+EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 SYNTHESIZER_EPOCHS="--synthesizer-epochs 100"           # for CTGAN/TVAE only
 QUIET=""              # add "-q" to reduce verbosity
 
@@ -44,5 +46,7 @@ python3 tabular_evaluation.py \
   $COMPARATIVE_PLOTS \
   $TRAIN_SYNTHESIZER \
   $SAVE_SYNTHETIC \
+  $EVAL_VISUALIZATIONS \
+  $EVAL_PLOT_FORMAT \
   $SYNTHESIZER_EPOCHS \
   $QUIET
