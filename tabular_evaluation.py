@@ -382,7 +382,7 @@ def _is_numeric(series: pd.Series) -> bool:
 
 def _generate_eval_visualizations(
     real_data: pd.DataFrame,
-    synthetic_data: pd.DataFrame,
+    synthetic_list: list[pd.DataFrame],
     metadata: object,
     output_dir: Path,
     subsample_name: str,
@@ -390,11 +390,13 @@ def _generate_eval_visualizations(
     quiet: bool,
     eval_plot_format: str = "pdf",
 ) -> None:
-    """Generate Seaborn distribution comparison plots (real vs synthetic) per subsample."""
+    """Generate Seaborn distribution comparison plots (real vs synthetic) per subsample.
+    When len(synthetic_list) > 1, synthetic bars show mean ± std across K runs."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import numpy as np
         import seaborn as sns
         plt.rcParams["figure.max_open_warning"] = 0
     except ImportError:
@@ -406,26 +408,62 @@ def _generate_eval_visualizations(
     cols = list(real_data.columns)
     plot_dir = output_dir / "eval_plots" / subsample_name
     plot_dir.mkdir(parents=True, exist_ok=True)
+    k_synth = len(synthetic_list)
+    show_std = k_synth > 1
+
+    # Combined dataframe for pair plots (real + first synthetic to avoid K× inflation)
     real_m = real_data.copy()
     real_m["_Source"] = "Real"
-    synth_m = synthetic_data.copy()
-    synth_m["_Source"] = "Synthetic"
-    combined = pd.concat([real_m, synth_m], ignore_index=True)
+    synth_first = synthetic_list[0].copy()
+    synth_first["_Source"] = "Synthetic"
+    combined = pd.concat([real_m, synth_first], ignore_index=True)
 
     # Single-column: distribution comparison
     for col in cols:
         try:
             fig, ax = plt.subplots(figsize=(10, 5))
             if _is_numeric(real_data[col]):
+                real_m = real_data.copy()
+                real_m["_Source"] = "Real"
+                synth_all = pd.concat([s.copy() for s in synthetic_list], ignore_index=True)
+                synth_all["_Source"] = "Synthetic"
+                combined = pd.concat([real_m, synth_all], ignore_index=True)
                 sns.histplot(
                     data=combined, x=col, hue="_Source", multiple="layer", kde=True,
                     ax=ax, alpha=0.6, common_norm=False
                 )
             else:
-                counts = combined.groupby([col, "_Source"]).size().reset_index(name="count")
-                sns.barplot(data=counts, x=col, y="count", hue="_Source", ax=ax, alpha=0.9)
-                plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-            ax.set_title(f"{col} – Real vs Synthetic")
+                # Categorical: compute mean and std across K synthetic runs
+                all_cats = pd.Index(real_data[col].dropna().unique())
+                for s in synthetic_list:
+                    all_cats = all_cats.union(pd.Index(s[col].dropna().unique()))
+                cat_order = list(all_cats)
+                real_counts = real_data[col].value_counts().reindex(cat_order, fill_value=0).fillna(0)
+                synth_counts_list = [s[col].value_counts().reindex(cat_order, fill_value=0).fillna(0) for s in synthetic_list]
+                synth_mean = np.array([c.values for c in synth_counts_list]).mean(axis=0)
+                synth_std = np.array([c.values for c in synth_counts_list]).std(axis=0) if show_std else np.zeros(len(cat_order))
+
+                x = np.arange(len(cat_order))
+                width = 0.35
+                real_vals = np.asarray(real_counts.values, dtype=float)
+                ax.bar(x - width / 2, real_vals, width, label="Real", alpha=0.9, color="C0")
+                bars = ax.bar(x + width / 2, synth_mean, width, label="Synthetic (mean)" + (" ± std" if show_std else ""), alpha=0.9, color="C1")
+                if show_std and np.any(synth_std > 0):
+                    ax.errorbar(x + width / 2, synth_mean, yerr=synth_std, fmt="none", color="black", capsize=2)
+                # Labels on top of bars
+                y_max = max(real_vals.max(), (synth_mean + synth_std).max()) if len(cat_order) else 1
+                offset = max(0.5, 0.03 * y_max)
+                for i, v in enumerate(real_vals):
+                    ax.text(x[i] - width / 2, v + offset, f"{int(v)}", ha="center", va="bottom", fontsize=8, color="C0")
+                for i, (m, s) in enumerate(zip(synth_mean, synth_std)):
+                    label = f"{m:.1f}" + (f"\n±{s:.1f}" if show_std and s > 0 else "")
+                    ax.text(x[i] + width / 2, m + s + offset, label, ha="center", va="bottom", fontsize=8, color="C1")
+                ax.set_xticks(x)
+                ax.set_xticklabels(cat_order, rotation=45, ha="right")
+                ax.set_ylabel("Count")
+                ax.set_ylim(0, y_max + offset * 3)  # headroom for labels
+                ax.legend()
+            ax.set_title(f"{col} – Real vs Synthetic" + (f" (K={k_synth} runs)" if show_std else ""))
             plt.tight_layout()
             fig.savefig(plot_dir / f"column_{col}.{ext}", dpi=100, bbox_inches="tight")
             plt.close()
@@ -628,7 +666,7 @@ def _train_synthesizers(
                     print(f"  {name}: generating eval visualizations...")
                 _generate_eval_visualizations(
                     real_data=subsample_df,
-                    synthetic_data=synthetic_list[0],
+                    synthetic_list=synthetic_list,
                     metadata=metadata,
                     output_dir=synthetic_dir,
                     subsample_name=name,
