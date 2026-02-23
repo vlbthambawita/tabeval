@@ -10,7 +10,7 @@ DATA_SOURCE="--sdv-demo"
 SDV_MODALITY="single_table"
 SDV_DATASET="child"
 
-# Stratification & split
+# Stratification & split (test set is held out and used as ML validation for --eval-ml-augmentation)
 STRATIFY_COLUMN="Disease"
 TEST_SIZE=1000
 SUBSAMPLE_SIZES="1000,800,600,400,200"
@@ -26,6 +26,10 @@ TRAIN_SYNTHESIZER="--train-synthesizer gaussian_copula"  # set to "--train-synth
 SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/synthetic/<dataset>/<synthesizer>/
 EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (column + pair) per subsample
 EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
+EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
+EVAL_K_RUNS="--eval-k-runs 5"   # K training runs per subsample (saves *_synthetic_run0.csv, run1.csv, etc.); use with EVAL_ML_AUGMENTATION for mean±std
+PREDICTION_COLUMN="--prediction-column Sick"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
+MINORITY_CLASS="--minority-class-label yes"   # add "--minority-class-label Fallot" (or other class from prediction column)
 SYNTHESIZER_EPOCHS="--synthesizer-epochs 100"           # for CTGAN/TVAE only
 QUIET=""              # add "-q" to reduce verbosity
 
@@ -48,5 +52,9 @@ python3 tabular_evaluation.py \
   $SAVE_SYNTHETIC \
   $EVAL_VISUALIZATIONS \
   $EVAL_PLOT_FORMAT \
+  $EVAL_ML_AUGMENTATION \
+  $EVAL_K_RUNS \
+  $PREDICTION_COLUMN \
+  $MINORITY_CLASS \
   $SYNTHESIZER_EPOCHS \
   $QUIET

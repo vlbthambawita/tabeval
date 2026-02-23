@@ -123,6 +123,27 @@ def parse_args():
         default="pdf",
         help="Format for eval plots: pdf or png.",
     )
+    parser.add_argument(
+        "--eval-ml-augmentation",
+        action="store_true",
+        help="Evaluate BinaryClassifierPrecisionEfficacy and BinaryClassifierRecallEfficacy (requires --train-synthesizer, --prediction-column, --minority-class-label).",
+    )
+    parser.add_argument(
+        "--eval-k-runs",
+        type=int,
+        default=1,
+        help="Train synthesizer K times per subsample and generate K synthetic datasets (saved as *_synthetic_run0.csv, etc.). Use with --eval-ml-augmentation for mean±std metrics.",
+    )
+    parser.add_argument(
+        "--prediction-column",
+        default=None,
+        help="Column to predict for ML augmentation metrics (default: --stratify-column). Must be categorical/boolean. Validation uses the held-out test set.",
+    )
+    parser.add_argument(
+        "--minority-class-label",
+        default=None,
+        help="Positive/minority class value for binary metrics (e.g. 'Fallot' for Disease column). Required with --eval-ml-augmentation.",
+    )
 
     # Misc
     parser.add_argument(
@@ -325,6 +346,12 @@ def run(args) -> dict:
 
     if args.train_synthesizer:
         dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
+        pred_col = args.prediction_column or args.stratify_column
+        if args.eval_ml_augmentation and not args.minority_class_label:
+            raise ValueError(
+                "--eval-ml-augmentation requires --minority-class-label "
+                f"(e.g. one value from {args.stratify_column} column)"
+            )
         _train_synthesizers(
             stratified_subsamples=stratified_subsamples,
             synthesizer_name=args.train_synthesizer,
@@ -338,6 +365,11 @@ def run(args) -> dict:
             eval_visualizations=args.eval_visualizations,
             stratify_column=args.stratify_column,
             eval_plot_format=args.eval_plot_format,
+            eval_ml_augmentation=args.eval_ml_augmentation,
+            eval_k_runs=args.eval_k_runs,
+            test_data=test_data,
+            prediction_column=pred_col,
+            minority_class_label=args.minority_class_label,
         )
 
     return result
@@ -437,6 +469,79 @@ def _generate_eval_visualizations(
                 plt.close("all")
 
 
+def _compute_ml_augmentation_metrics(
+    real_training_data: pd.DataFrame,
+    synthetic_list: list[pd.DataFrame],
+    real_validation_data: pd.DataFrame,
+    metadata: object,
+    prediction_column: str,
+    minority_class_label: str | int,
+    quiet: bool,
+) -> dict:
+    """Compute BinaryClassifierPrecisionEfficacy and BinaryClassifierRecallEfficacy across K synthetic datasets. Returns mean±std."""
+    try:
+        from sdmetrics.single_table.data_augmentation import (
+            BinaryClassifierPrecisionEfficacy,
+            BinaryClassifierRecallEfficacy,
+        )
+    except ImportError as e:
+        if not quiet:
+            print(f"  Skipping ML augmentation eval: {e} (install xgboost: pip install xgboost)")
+        return {}
+
+    # Get metadata as dict (SingleTableMetadata format)
+    if hasattr(metadata, "_convert_to_single_table"):
+        meta_dict = metadata._convert_to_single_table().to_dict()
+    else:
+        meta_dict = metadata
+
+    precision_scores = []
+    recall_scores = []
+    for syn in synthetic_list:
+        try:
+            prec = BinaryClassifierPrecisionEfficacy.compute(
+                real_training_data=real_training_data,
+                synthetic_data=syn,
+                real_validation_data=real_validation_data,
+                metadata=meta_dict,
+                prediction_column_name=prediction_column,
+                minority_class_label=minority_class_label,
+                classifier="XGBoost",
+                fixed_recall_value=0.9,
+            )
+            rec = BinaryClassifierRecallEfficacy.compute(
+                real_training_data=real_training_data,
+                synthetic_data=syn,
+                real_validation_data=real_validation_data,
+                metadata=meta_dict,
+                prediction_column_name=prediction_column,
+                minority_class_label=minority_class_label,
+                classifier="XGBoost",
+                fixed_precision_value=0.9,
+            )
+            precision_scores.append(float(prec))
+            recall_scores.append(float(rec))
+        except Exception as e:
+            if not quiet:
+                print(f"    Metric computation failed for one run: {e}")
+
+    import numpy as np
+    result = {}
+    if precision_scores:
+        result["BinaryClassifierPrecisionEfficacy"] = {
+            "mean": float(np.mean(precision_scores)),
+            "std": float(np.std(precision_scores)),
+            "scores": precision_scores,
+        }
+    if recall_scores:
+        result["BinaryClassifierRecallEfficacy"] = {
+            "mean": float(np.mean(recall_scores)),
+            "std": float(np.std(recall_scores)),
+            "scores": recall_scores,
+        }
+    return result
+
+
 def _train_synthesizers(
     stratified_subsamples: dict,
     synthesizer_name: str,
@@ -450,8 +555,14 @@ def _train_synthesizers(
     eval_visualizations: bool = False,
     stratify_column: str | None = None,
     eval_plot_format: str = "pdf",
+    eval_ml_augmentation: bool = False,
+    eval_k_runs: int = 5,
+    test_data: pd.DataFrame | None = None,
+    prediction_column: str | None = None,
+    minority_class_label: str | int | None = None,
 ) -> None:
-    """Train SDV synthesizer on each subsample and generate synthetic data of same size."""
+    """Train SDV synthesizer on each subsample and generate synthetic data of same size.
+    When eval_ml_augmentation=True, trains K times per subsample and evaluates with mean±std."""
     try:
         from sdv.single_table import GaussianCopulaSynthesizer, CTGANSynthesizer, TVAESynthesizer
         from sdv.metadata import Metadata
@@ -475,6 +586,9 @@ def _train_synthesizers(
     if quiet is False:
         print(f"Training {synthesizer_name} on {len(stratified_subsamples)} subsamples...")
 
+    k_runs = max(1, eval_k_runs)
+    ml_results = {}
+
     # Suppress SDV's "save metadata" UserWarning since we save it ourselves below
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -489,25 +603,32 @@ def _train_synthesizers(
                 metadata = base_metadata
             else:
                 metadata = Metadata.detect_from_dataframe(data=subsample_df, table_name=name)
-            synthesizer = _make_synthesizer(metadata)
 
-            synthesizer.fit(subsample_df)
-            synthetic_data = synthesizer.sample(num_rows=n_rows)
+            synthetic_list = []
+            for k in range(k_runs):
+                run_seed = random_state + k * 10000
+                synthesizer = _make_synthesizer(metadata)
+                synthesizer.fit(subsample_df)
+                if hasattr(synthesizer, "_set_random_state"):
+                    synthesizer._set_random_state(run_seed)
+                synthetic_data = synthesizer.sample(num_rows=n_rows)
+                synthetic_list.append(synthetic_data)
 
-            if save_synthetic:
-                csv_path = synthetic_dir / f"{name}_synthetic.csv"
-                synthetic_data.to_csv(csv_path, index=False)
-                metadata_path = synthetic_dir / f"{name}_metadata.json"
-                metadata.save_to_json(filepath=metadata_path, mode="overwrite")
-                if quiet is False:
-                    print(f"  {name}: trained, sampled {n_rows} rows -> {csv_path}")
+                if save_synthetic:
+                    csv_path = synthetic_dir / f"{name}_synthetic_run{k}.csv"
+                    synthetic_data.to_csv(csv_path, index=False)
+                    if k == 0:
+                        metadata_path = synthetic_dir / f"{name}_metadata.json"
+                        metadata.save_to_json(filepath=metadata_path, mode="overwrite")
+                    if quiet is False:
+                        print(f"  {name}: run {k+1}/{k_runs} -> {csv_path}")
 
-            if eval_visualizations:
+            if eval_visualizations and synthetic_list:
                 if quiet is False:
                     print(f"  {name}: generating eval visualizations...")
                 _generate_eval_visualizations(
                     real_data=subsample_df,
-                    synthetic_data=synthetic_data,
+                    synthetic_data=synthetic_list[0],
                     metadata=metadata,
                     output_dir=synthetic_dir,
                     subsample_name=name,
@@ -515,6 +636,39 @@ def _train_synthesizers(
                     quiet=quiet,
                     eval_plot_format=eval_plot_format,
                 )
+
+            if eval_ml_augmentation and synthetic_list and test_data is not None and prediction_column and minority_class_label is not None:
+                if quiet is False:
+                    print(f"  {name}: evaluating ML augmentation (K={k_runs})...")
+                metrics = _compute_ml_augmentation_metrics(
+                    real_training_data=subsample_df,
+                    synthetic_list=synthetic_list,
+                    real_validation_data=test_data.copy(),
+                    metadata=metadata,
+                    prediction_column=prediction_column,
+                    minority_class_label=minority_class_label,
+                    quiet=quiet,
+                )
+                if metrics:
+                    ml_results[name] = metrics
+                    if quiet is False:
+                        for m, v in metrics.items():
+                            print(f"    {m}: {v['mean']:.4f} ± {v['std']:.4f}")
+
+    if ml_results:
+        import json
+        eval_path = synthetic_dir / "ml_augmentation_eval.json"
+        # Convert for JSON (handle numpy types)
+        dumpable = {}
+        for name, m in ml_results.items():
+            dumpable[name] = {
+                k: {"mean": v["mean"], "std": v["std"], "scores": v["scores"]}
+                for k, v in m.items()
+            }
+        with open(eval_path, "w") as f:
+            json.dump(dumpable, f, indent=2)
+        if quiet is False:
+            print(f"ML augmentation results saved to {eval_path}")
 
     if quiet is False:
         print(f"Synthetic data saved to {synthetic_dir}")
