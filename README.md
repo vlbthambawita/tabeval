@@ -28,14 +28,14 @@ pip install pandas scikit-learn matplotlib seaborn sdv xgboost
 
 ## Core Script: `tabular_evaluation.py`
 
-The main Python script that powers all three shell wrappers. It provides:
+The main Python script that powers all shell wrappers. It provides:
 
 | Option | Description |
 |--------|-------------|
 | `--data-path PATH` | Load from CSV/Excel file |
 | `--sdv-demo` | Use SDV demo dataset |
 | `--sdv-modality` | SDV modality (e.g. `single_table`) |
-| `--sdv-dataset` | Demo dataset name: `child`, `census`, `news`, etc. |
+| `--sdv-dataset` | Demo dataset name: `child`, `census`, `news`, `adult`, etc. |
 | `--stratify-column` | Column for stratified sampling |
 | `--test-size` | Size of held-out test set |
 | `--subsample-sizes` | Comma-separated sizes (e.g. `400,200`) |
@@ -53,12 +53,14 @@ The main Python script that powers all three shell wrappers. It provides:
 
 ## Shell Scripts: Use Cases
 
-Three preconfigured shell scripts run `tabular_evaluation.py` with different datasets and settings. Edit the variables at the top of each script, then run:
+Preconfigured shell scripts run `tabular_evaluation.py` with different datasets and settings. Edit the variables at the top of each script, then run:
 
 ```bash
 ./run_tabular_evaluation.sh
+./run_tabular_evaluation_cat_only.sh
 ./run_tabular_evaluation_num_only.sh
 ./run_tabular_evaluation_num_both.sh
+./run_tabular_evaluation_cat_and_num.sh
 ```
 
 ### 1. `run_tabular_evaluation.sh` — Categorical Medical/Health Data
@@ -113,6 +115,24 @@ Three preconfigured shell scripts run `tabular_evaluation.py` with different dat
 
 ---
 
+### 4. `run_tabular_evaluation_cat_and_num.sh` — Adult / Mixed Categorical + Numerical
+
+| Setting | Value |
+|---------|-------|
+| **Dataset** | `adult` (SDV demo) |
+| **Stratify** | `label` (income) |
+| **Prediction** | `label` |
+| **Minority class** | `>50K` |
+| **ML label encode** | `--ml-label-encode` ✅ |
+
+**Use case**: Datasets with both categorical and numerical features (e.g., Adult income: age, education, occupation, etc.). Uses `--ml-label-encode` for high-cardinality categoricals to ensure reliable ML augmentation evaluation.
+
+```bash
+./run_tabular_evaluation_cat_and_num.sh
+```
+
+---
+
 ## Output Structure
 
 ```
@@ -156,9 +176,10 @@ To use your own CSV instead of an SDV demo:
 
 | Your data type | Script |
 |----------------|--------|
-| Medical/health, few categoricals | `run_tabular_evaluation.sh` |
+| Medical/health, few categoricals | `run_tabular_evaluation.sh` / `run_tabular_evaluation_cat_only.sh` |
 | News/text-derived, single label | `run_tabular_evaluation_num_only.sh` |
 | Census-like, many categoricals | `run_tabular_evaluation_num_both.sh` |
+| Adult-like, mixed categorical + numerical | `run_tabular_evaluation_cat_and_num.sh` |
 | Custom CSV | Copy any script, switch to `--data-path` |
 
 ---

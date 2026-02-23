@@ -8,7 +8,7 @@ DATA_SOURCE="--sdv-demo"
 
 # SDV options (when using --sdv-demo)
 SDV_MODALITY="single_table"
-SDV_DATASET="census"
+SDV_DATASET="adult"
 
 # Stratification & split (test set is held out and used as ML validation for --eval-ml-augmentation)
 STRATIFY_COLUMN="label"
@@ -30,7 +30,7 @@ EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" t
 ML_LABEL_ENCODE="--ml-label-encode"   # add to fix XGBoost "enable_categorical" error with many categorical features (e.g. census)
 EVAL_K_RUNS="--eval-k-runs 5"   # K training runs per subsample (saves *_synthetic_run0.csv, run1.csv, etc.); use with EVAL_ML_AUGMENTATION for mean±std
 PREDICTION_COLUMN="--prediction-column label"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
-MINORITY_CLASS="--minority-class-label 50000+"   # add "--minority-class-label Fallot" (or other class from prediction column)
+MINORITY_CLASS="--minority-class-label >50K"   # add "--minority-class-label Fallot" (or other class from prediction column)
 SYNTHESIZER_EPOCHS="--synthesizer-epochs 100"           # for CTGAN/TVAE only
 QUIET=""              # add "-q" to reduce verbosity
 
