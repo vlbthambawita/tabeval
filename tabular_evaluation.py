@@ -154,7 +154,7 @@ def parse_args():
     parser.add_argument(
         "--eval-privacy",
         action="store_true",
-        help="Evaluate DCRBaselineProtection privacy metric (requires --train-synthesizer). See https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection",
+        help="Evaluate privacy metrics: DCRBaselineProtection and DCROverfittingProtection (requires --train-synthesizer). Uses held-out test set for DCROverfittingProtection.",
     )
     parser.add_argument(
         "--eval-privacy-subsample",
@@ -793,14 +793,16 @@ def _compute_privacy_metrics(
     synthetic_list: list[pd.DataFrame],
     metadata: object,
     num_rows_subsample: int | None = None,
+    real_validation_data: pd.DataFrame | None = None,
     quiet: bool = False,
 ) -> dict:
-    """Compute DCRBaselineProtection privacy metric across K synthetic datasets.
-    Returns mean±std and per-run scores. See:
-    https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection
-    """
+    """Compute privacy metrics across K synthetic datasets.
+    - DCRBaselineProtection: https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection
+    - DCROverfittingProtection: https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcroverfittingprotection
+      (requires real_validation_data - holdout set not used for training)
+    Returns mean±std and per-run scores for each metric."""
     try:
-        from sdmetrics.single_table import DCRBaselineProtection
+        from sdmetrics.single_table import DCRBaselineProtection, DCROverfittingProtection
     except ImportError as e:
         if not quiet:
             print(f"  Skipping privacy eval: {e}")
@@ -808,6 +810,10 @@ def _compute_privacy_metrics(
 
     meta_dict = metadata._convert_to_single_table().to_dict() if hasattr(metadata, "_convert_to_single_table") else metadata
 
+    import numpy as np
+    out = {}
+
+    # DCRBaselineProtection
     scores = []
     breakdowns = []
     for syn in synthetic_list:
@@ -829,8 +835,6 @@ def _compute_privacy_metrics(
             if not quiet:
                 print(f"    DCRBaselineProtection failed for one run: {e}")
 
-    import numpy as np
-    out = {}
     if scores:
         out["DCRBaselineProtection"] = {
             "mean": float(np.mean(scores)),
@@ -839,6 +843,40 @@ def _compute_privacy_metrics(
         }
         if breakdowns and isinstance(breakdowns[0], dict) and "median_DCR_to_real_data" in breakdowns[0]:
             out["DCRBaselineProtection"]["median_DCR_to_real_data"] = breakdowns[0]["median_DCR_to_real_data"]
+
+    # DCROverfittingProtection (requires validation holdout)
+    if real_validation_data is not None and len(real_validation_data) > 0:
+        scores_overfit = []
+        breakdowns_overfit = []
+        for syn in synthetic_list:
+            try:
+                result = DCROverfittingProtection.compute_breakdown(
+                    real_training_data=real_data,
+                    synthetic_data=syn,
+                    real_validation_data=real_validation_data,
+                    metadata=meta_dict,
+                    num_rows_subsample=num_rows_subsample,
+                )
+                if isinstance(result, dict):
+                    score_val = result.get("score")
+                else:
+                    score_val = float(result)
+                if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)):
+                    scores_overfit.append(float(score_val))
+                    breakdowns_overfit.append(result)
+            except Exception as e:
+                if not quiet:
+                    print(f"    DCROverfittingProtection failed for one run: {e}")
+
+        if scores_overfit:
+            out["DCROverfittingProtection"] = {
+                "mean": float(np.mean(scores_overfit)),
+                "std": float(np.std(scores_overfit)),
+                "scores": scores_overfit,
+            }
+            if breakdowns_overfit and isinstance(breakdowns_overfit[0], dict) and "synthetic_data_percentages" in breakdowns_overfit[0]:
+                out["DCROverfittingProtection"]["synthetic_data_percentages"] = breakdowns_overfit[0]["synthetic_data_percentages"]
+
     return out
 
 
@@ -965,12 +1003,13 @@ def _train_synthesizers(
 
             if eval_privacy and synthetic_list:
                 if quiet is False:
-                    print(f"  {name}: evaluating DCRBaselineProtection privacy (K={k_runs})...")
+                    print(f"  {name}: evaluating privacy (DCRBaselineProtection, DCROverfittingProtection) (K={k_runs})...")
                 privacy_metrics = _compute_privacy_metrics(
                     real_data=subsample_df,
                     synthetic_list=synthetic_list,
                     metadata=metadata,
                     num_rows_subsample=eval_privacy_subsample,
+                    real_validation_data=test_data.copy() if test_data is not None else None,
                     quiet=quiet,
                 )
                 if privacy_metrics:
@@ -1018,6 +1057,8 @@ def _train_synthesizers(
                 entry = {"mean": v["mean"], "std": v["std"], "scores": v["scores"]}
                 if "median_DCR_to_real_data" in v:
                     entry["median_DCR_to_real_data"] = v["median_DCR_to_real_data"]
+                if "synthetic_data_percentages" in v:
+                    entry["synthetic_data_percentages"] = v["synthetic_data_percentages"]
                 dumpable[name][k] = entry
         with open(privacy_path, "w") as f:
             json.dump(dumpable, f, indent=2)
