@@ -437,11 +437,20 @@ def run(args) -> dict:
     if args.train_synthesizer:
         dataset_name = args.data_path.stem if args.data_path else args.sdv_dataset
         pred_col = args.prediction_column or args.stratify_column
-        if args.eval_ml_augmentation and not args.minority_class_label:
-            raise ValueError(
-                "--eval-ml-augmentation requires --minority-class-label "
-                f"(e.g. one value from {args.stratify_column} column)"
-            )
+        # For ML augmentation:
+        # - If the target is categorical, require --minority-class-label (binary classification).
+        # - If the target is numerical, use regression ML efficacy metrics (no minority label needed).
+        if args.eval_ml_augmentation:
+            if pred_col not in clean_data.columns:
+                raise ValueError(
+                    f"--eval-ml-augmentation target '{pred_col}' not found in data columns."
+                )
+            target_is_numeric = pd.api.types.is_numeric_dtype(clean_data[pred_col])
+            if not target_is_numeric and not args.minority_class_label:
+                raise ValueError(
+                    "--eval-ml-augmentation for categorical targets requires "
+                    "--minority-class-label (e.g. one value from the prediction column)."
+                )
         if args.eval_privacy_disclosure and (not args.eval_privacy_disclosure_known or not args.eval_privacy_disclosure_sensitive):
             raise ValueError(
                 "--eval-privacy-disclosure requires --eval-privacy-disclosure-known and --eval-privacy-disclosure-sensitive"
@@ -862,6 +871,84 @@ def _compute_ml_augmentation_metrics(
             "mean": float(np.mean(recall_scores)),
             "std": float(np.std(recall_scores)),
             "scores": recall_scores,
+        }
+    return result
+
+
+def _compute_ml_regression_metrics(
+    real_training_data: pd.DataFrame,
+    synthetic_list: list[pd.DataFrame],
+    real_validation_data: pd.DataFrame,
+    metadata: object,
+    prediction_column: str,
+    quiet: bool = False,
+) -> dict:
+    """Compute regression ML efficacy metrics (LinearRegression, MLPRegressor) across K synthetic datasets.
+
+    Follows the SDMetrics regression API:
+      https://docs.sdv.dev/sdmetrics/data-metrics/metrics-in-beta/ml-efficacy-single-table/regression
+    Uses a TSTR setup: train on synthetic, test on real validation data.
+    """
+    try:
+        from sdmetrics.single_table import LinearRegression, MLPRegressor
+    except ImportError as e:
+        if not quiet:
+            print(f"  Skipping ML regression eval: {e}")
+        return {}
+
+    if not pd.api.types.is_numeric_dtype(real_validation_data[prediction_column]):
+        if not quiet:
+            print("  Skipping ML regression eval: target variable is not numerical.")
+        return {}
+
+    # Get metadata as dict (SingleTableMetadata format) or pass through as-is.
+    if hasattr(metadata, "_convert_to_single_table"):
+        meta_dict = metadata._convert_to_single_table().to_dict()
+    else:
+        meta_dict = metadata
+
+    lr_scores: list[float] = []
+    mlp_scores: list[float] = []
+
+    for syn in synthetic_list:
+        try:
+            # Train on synthetic, test on real validation data.
+            lr = LinearRegression.compute(
+                test_data=real_validation_data,
+                train_data=syn,
+                target=prediction_column,
+                metadata=meta_dict,
+            )
+            lr_scores.append(float(lr))
+        except Exception as e:
+            if not quiet:
+                print(f"    LinearRegression efficacy failed for one run: {e}")
+
+        try:
+            mlp = MLPRegressor.compute(
+                test_data=real_validation_data,
+                train_data=syn,
+                target=prediction_column,
+                metadata=meta_dict,
+            )
+            mlp_scores.append(float(mlp))
+        except Exception as e:
+            if not quiet:
+                print(f"    MLPRegressor efficacy failed for one run: {e}")
+
+    import numpy as np
+    result: dict = {}
+    if lr_scores:
+        result["LinearRegression"] = {
+            "mean": float(np.mean(lr_scores)),
+            "std": float(np.std(lr_scores)),
+            "scores": lr_scores,
+        }
+    if mlp_scores:
+        result["MLPRegressor"] = {
+            "mean": float(np.mean(mlp_scores)),
+            "std": float(np.std(mlp_scores)),
+            "scores": mlp_scores,
         }
     return result
 
@@ -1336,19 +1423,33 @@ def _train_synthesizers(
                     eval_plot_format=eval_plot_format,
                 )
 
-            if eval_ml_augmentation and synthetic_list and test_data is not None and prediction_column and minority_class_label is not None:
-                if quiet is False:
-                    print(f"  {name}: evaluating ML augmentation (K={k_runs})...")
-                metrics = _compute_ml_augmentation_metrics(
-                    real_training_data=subsample_df,
-                    synthetic_list=synthetic_list,
-                    real_validation_data=test_data.copy(),
-                    metadata=metadata,
-                    prediction_column=prediction_column,
-                    minority_class_label=minority_class_label,
-                    ml_label_encode=eval_ml_label_encode,
-                    quiet=quiet,
-                )
+            if eval_ml_augmentation and synthetic_list and test_data is not None and prediction_column:
+                target_is_numeric = pd.api.types.is_numeric_dtype(test_data[prediction_column])
+                metrics = {}
+                if target_is_numeric:
+                    if quiet is False:
+                        print(f"  {name}: evaluating ML augmentation (regression, K={k_runs})...")
+                    metrics = _compute_ml_regression_metrics(
+                        real_training_data=subsample_df,
+                        synthetic_list=synthetic_list,
+                        real_validation_data=test_data.copy(),
+                        metadata=metadata,
+                        prediction_column=prediction_column,
+                        quiet=quiet,
+                    )
+                elif minority_class_label is not None:
+                    if quiet is False:
+                        print(f"  {name}: evaluating ML augmentation (binary classification, K={k_runs})...")
+                    metrics = _compute_ml_augmentation_metrics(
+                        real_training_data=subsample_df,
+                        synthetic_list=synthetic_list,
+                        real_validation_data=test_data.copy(),
+                        metadata=metadata,
+                        prediction_column=prediction_column,
+                        minority_class_label=minority_class_label,
+                        ml_label_encode=eval_ml_label_encode,
+                        quiet=quiet,
+                    )
                 if metrics:
                     ml_results[name] = metrics
                     if quiet is False:
