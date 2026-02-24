@@ -214,6 +214,19 @@ def parse_args():
         metavar="FLOAT",
         help="Real association threshold (Cramer's V) for ContingencySimilarity. Pairs below this get NaN. Recommended: 0.3 or above.",
     )
+    parser.add_argument(
+        "--eval-quality-correlation-coefficient",
+        choices=["Pearson", "Spearman"],
+        default="Pearson",
+        help="Correlation coefficient for CorrelationSimilarity (numerical pairs). Default: Pearson.",
+    )
+    parser.add_argument(
+        "--eval-quality-correlation-threshold",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        help="Real correlation threshold for CorrelationSimilarity. Pairs below |r| get NaN. Recommended: 0.4 or above.",
+    )
 
     # Misc
     parser.add_argument(
@@ -464,6 +477,8 @@ def run(args) -> dict:
             eval_quality=args.eval_quality,
             eval_quality_subsample=args.eval_quality_subsample,
             eval_quality_threshold=args.eval_quality_threshold,
+            eval_quality_correlation_coefficient=args.eval_quality_correlation_coefficient,
+            eval_quality_correlation_threshold=args.eval_quality_correlation_threshold,
         )
 
     return result
@@ -995,24 +1010,30 @@ def _compute_quality_metrics(
     synthetic_list: list[pd.DataFrame],
     num_rows_subsample: int | None = None,
     real_association_threshold: float | None = None,
+    correlation_coefficient: str = "Pearson",
+    correlation_threshold: float | None = None,
     quiet: bool = False,
 ) -> dict:
-    """Compute ContingencySimilarity for all compatible column pairs.
+    """Compute ContingencySimilarity (categorical/mixed) and CorrelationSimilarity (numerical pairs).
     See: https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity
+         https://docs.sdv.dev/sdmetrics/data-metrics/quality/correlationsimilarity
     """
     try:
-        from sdmetrics.column_pairs import ContingencySimilarity
+        from sdmetrics.column_pairs import ContingencySimilarity, CorrelationSimilarity
         import itertools
         import numpy as np
     except ImportError as e:
         if not quiet:
-            print(f"  Skipping quality eval (ContingencySimilarity): {e}")
+            print(f"  Skipping quality eval: {e}")
         return {}
 
     cols = list(real_data.columns)
     if len(cols) < 2:
         return {}
 
+    out = {}
+
+    # ContingencySimilarity: categorical/mixed pairs
     continuous_cols = [
         c for c in cols
         if pd.api.types.is_numeric_dtype(real_data[c]) and real_data[c].nunique() > 10
@@ -1047,17 +1068,13 @@ def _compute_quality_metrics(
                 pass
 
     valid_pairs = {p: s for p, s in scores_by_pair.items() if s}
-    if not valid_pairs:
-        return {}
-
-    all_scores = []
-    pair_means = {}
-    for pair, run_scores in valid_pairs.items():
-        pair_means[pair] = float(np.mean(run_scores))
-        all_scores.extend(run_scores)
-
-    return {
-        "ContingencySimilarity": {
+    if valid_pairs:
+        all_scores = []
+        pair_means = {}
+        for pair, run_scores in valid_pairs.items():
+            pair_means[pair] = float(np.mean(run_scores))
+            all_scores.extend(run_scores)
+        out["ContingencySimilarity"] = {
             "mean": float(np.mean(all_scores)),
             "std": float(np.std(all_scores)) if len(all_scores) > 1 else 0.0,
             "scores": [float(s) for s in all_scores],
@@ -1065,7 +1082,56 @@ def _compute_quality_metrics(
             "total_pairs": len(pairs),
             "pair_means": {f"{p[0]}|{p[1]}": v for p, v in pair_means.items()},
         }
-    }
+
+    # CorrelationSimilarity: numerical pairs only
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(real_data[c])]
+    num_pairs = list(itertools.combinations(numeric_cols, 2))
+    if not num_pairs:
+        return out
+
+    corr_scores_by_pair = {pair: [] for pair in num_pairs}
+    for syn in synthetic_list:
+        for c1, c2 in num_pairs:
+            try:
+                real_sub = real_data[[c1, c2]].dropna()
+                syn_sub = syn[[c1, c2]].dropna()
+                if len(real_sub) < 2 or len(syn_sub) < 2:
+                    continue
+                if num_rows_subsample and len(real_sub) > num_rows_subsample:
+                    real_sub = real_sub.sample(n=num_rows_subsample, random_state=42)
+                if num_rows_subsample and len(syn_sub) > num_rows_subsample:
+                    syn_sub = syn_sub.sample(n=num_rows_subsample, random_state=42)
+                kwargs = {"coefficient": correlation_coefficient}
+                if correlation_threshold is not None:
+                    kwargs["real_correlation_threshold"] = correlation_threshold
+                score = CorrelationSimilarity.compute(
+                    real_data=real_sub,
+                    synthetic_data=syn_sub,
+                    **kwargs,
+                )
+                if score is not None and not (isinstance(score, float) and pd.isna(score)):
+                    corr_scores_by_pair[(c1, c2)].append(float(score))
+            except Exception:
+                pass
+
+    valid_num_pairs = {p: s for p, s in corr_scores_by_pair.items() if s}
+    if valid_num_pairs:
+        all_corr_scores = []
+        corr_pair_means = {}
+        for pair, run_scores in valid_num_pairs.items():
+            corr_pair_means[pair] = float(np.mean(run_scores))
+            all_corr_scores.extend(run_scores)
+        out["CorrelationSimilarity"] = {
+            "mean": float(np.mean(all_corr_scores)),
+            "std": float(np.std(all_corr_scores)) if len(all_corr_scores) > 1 else 0.0,
+            "scores": [float(s) for s in all_corr_scores],
+            "num_pairs": len(valid_num_pairs),
+            "total_pairs": len(num_pairs),
+            "pair_means": {f"{p[0]}|{p[1]}": v for p, v in corr_pair_means.items()},
+            "coefficient": correlation_coefficient,
+        }
+
+    return out
 
 
 def _train_synthesizers(
@@ -1099,6 +1165,8 @@ def _train_synthesizers(
     eval_quality: bool = False,
     eval_quality_subsample: int | None = None,
     eval_quality_threshold: float | None = None,
+    eval_quality_correlation_coefficient: str = "Pearson",
+    eval_quality_correlation_threshold: float | None = None,
 ) -> None:
     """Train SDV synthesizer on each subsample and generate synthetic data of same size.
     When eval_ml_augmentation=True, trains K times per subsample and evaluates with mean±std."""
@@ -1227,12 +1295,14 @@ def _train_synthesizers(
 
             if eval_quality and synthetic_list:
                 if quiet is False:
-                    print(f"  {name}: evaluating ContingencySimilarity (K={k_runs})...")
+                    print(f"  {name}: evaluating quality (ContingencySimilarity, CorrelationSimilarity) (K={k_runs})...")
                 quality_metrics = _compute_quality_metrics(
                     real_data=subsample_df,
                     synthetic_list=synthetic_list,
                     num_rows_subsample=eval_quality_subsample,
                     real_association_threshold=eval_quality_threshold,
+                    correlation_coefficient=eval_quality_correlation_coefficient,
+                    correlation_threshold=eval_quality_correlation_threshold,
                     quiet=quiet,
                 )
                 if quality_metrics:
@@ -1306,6 +1376,8 @@ def _train_synthesizers(
                     entry["total_pairs"] = v["total_pairs"]
                 if "pair_means" in v:
                     entry["pair_means"] = v["pair_means"]
+                if "coefficient" in v:
+                    entry["coefficient"] = v["coefficient"]
                 dumpable[name][k] = entry
         with open(quality_path, "w") as f:
             json.dump(dumpable, f, indent=2)
