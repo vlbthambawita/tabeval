@@ -152,6 +152,13 @@ def parse_args():
         help="Label-encode categorical columns to int before ML augmentation (fixes XGBoost 'enable_categorical' error with many categorical features).",
     )
     parser.add_argument(
+        "--eval-ml-max-epochs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum epochs (XGBoost n_estimators) for ML augmentation evaluation. Used when --eval-ml-augmentation is set. Default leaves XGBoost default (100).",
+    )
+    parser.add_argument(
         "--eval-privacy",
         action="store_true",
         help="Evaluate privacy metrics: DCRBaselineProtection, DCROverfittingProtection, and optionally DisclosureProtection (requires --train-synthesizer). Use --eval-privacy-disclosure to enable DisclosureProtection.",
@@ -471,6 +478,7 @@ def run(args) -> dict:
             stratify_column=args.stratify_column,
             eval_plot_format=args.eval_plot_format,
             eval_ml_augmentation=args.eval_ml_augmentation,
+            eval_ml_max_epochs=args.eval_ml_max_epochs,
             eval_k_runs=args.eval_k_runs,
             test_data=test_data,
             prediction_column=pred_col,
@@ -787,9 +795,12 @@ def _compute_ml_augmentation_metrics(
     prediction_column: str,
     minority_class_label: str | int,
     ml_label_encode: bool = False,
+    ml_max_epochs: int | None = None,
     quiet: bool = False,
 ) -> dict:
-    """Compute BinaryClassifierPrecisionEfficacy and BinaryClassifierRecallEfficacy across K synthetic datasets. Returns mean±std."""
+    """Compute BinaryClassifierPrecisionEfficacy and BinaryClassifierRecallEfficacy across K synthetic datasets. Returns mean±std.
+    ml_max_epochs: if set, XGBoost n_estimators used in the evaluation (SDMetrics does not expose this, so we patch ClassifierTrainer).
+    """
     try:
         from sdmetrics.single_table.data_augmentation import (
             BinaryClassifierPrecisionEfficacy,
@@ -805,74 +816,96 @@ def _compute_ml_augmentation_metrics(
             print("  Skipping ML augmentation eval: target variable is numerical (binary classifier requires categorical target).")
         return {}
 
-    # Get metadata as dict (SingleTableMetadata format)
-    if hasattr(metadata, "_convert_to_single_table"):
-        meta_dict = metadata._convert_to_single_table().to_dict()
-    else:
-        meta_dict = metadata
-
-    # When label-encoding, pass metadata with encoded categorical cols as "numerical"
-    # so SDMetrics does not astype('category'), avoiding XGBoost dtype mismatch.
-    if ml_label_encode:
-        cat_cols = [c for c in real_training_data.columns
-                    if not pd.api.types.is_numeric_dtype(real_training_data[c])]
-        meta_dict = _metadata_for_label_encoded(meta_dict, cat_cols, prediction_column)
-
-    precision_scores = []
-    recall_scores = []
-    for syn in synthetic_list:
+    # Optionally patch SDMetrics ClassifierTrainer to use custom n_estimators (XGBoost)
+    da_base = None
+    _orig_init = None
+    if ml_max_epochs is not None:
         try:
-            train_prep, syn_prep, val_prep, effective_minority = _prepare_ml_augmentation_data(
-                real_training_data, syn, real_validation_data,
-                prediction_column=prediction_column,
-                minority_class_label=minority_class_label,
-                ml_label_encode=ml_label_encode,
-            )
-            if len(val_prep) < 10:
-                if not quiet:
-                    print("    Metric skipped: validation set too small after filtering unseen categories")
-                continue
-            prec = BinaryClassifierPrecisionEfficacy.compute(
-                real_training_data=train_prep,
-                synthetic_data=syn_prep,
-                real_validation_data=val_prep,
-                metadata=meta_dict,
-                prediction_column_name=prediction_column,
-                minority_class_label=effective_minority,
-                classifier="XGBoost",
-                fixed_recall_value=0.9,
-            )
-            rec = BinaryClassifierRecallEfficacy.compute(
-                real_training_data=train_prep,
-                synthetic_data=syn_prep,
-                real_validation_data=val_prep,
-                metadata=meta_dict,
-                prediction_column_name=prediction_column,
-                minority_class_label=effective_minority,
-                classifier="XGBoost",
-                fixed_precision_value=0.9,
-            )
-            precision_scores.append(float(prec))
-            recall_scores.append(float(rec))
-        except Exception as e:
-            if not quiet:
-                print(f"    Metric computation failed for one run: {e}")
+            import sdmetrics.single_table.data_augmentation.base as _da_base
+            da_base = _da_base
+            _orig_init = _da_base.ClassifierTrainer.__init__
 
-    import numpy as np
-    result = {}
-    if precision_scores:
-        result["BinaryClassifierPrecisionEfficacy"] = {
-            "mean": float(np.mean(precision_scores)),
-            "std": float(np.std(precision_scores)),
-            "scores": precision_scores,
-        }
-    if recall_scores:
-        result["BinaryClassifierRecallEfficacy"] = {
-            "mean": float(np.mean(recall_scores)),
-            "std": float(np.std(recall_scores)),
-            "scores": recall_scores,
-        }
-    return result
+            def _patched_init(self, *args, **kwargs):
+                _orig_init(self, *args, **kwargs)
+                self._classifier.set_params(n_estimators=ml_max_epochs)
+
+            _da_base.ClassifierTrainer.__init__ = _patched_init
+        except Exception:
+            da_base = None
+            _orig_init = None
+
+    try:
+        # Get metadata as dict (SingleTableMetadata format)
+        if hasattr(metadata, "_convert_to_single_table"):
+            meta_dict = metadata._convert_to_single_table().to_dict()
+        else:
+            meta_dict = metadata
+
+        # When label-encoding, pass metadata with encoded categorical cols as "numerical"
+        # so SDMetrics does not astype('category'), avoiding XGBoost dtype mismatch.
+        if ml_label_encode:
+            cat_cols = [c for c in real_training_data.columns
+                        if not pd.api.types.is_numeric_dtype(real_training_data[c])]
+            meta_dict = _metadata_for_label_encoded(meta_dict, cat_cols, prediction_column)
+
+        precision_scores = []
+        recall_scores = []
+        for syn in synthetic_list:
+            try:
+                train_prep, syn_prep, val_prep, effective_minority = _prepare_ml_augmentation_data(
+                    real_training_data, syn, real_validation_data,
+                    prediction_column=prediction_column,
+                    minority_class_label=minority_class_label,
+                    ml_label_encode=ml_label_encode,
+                )
+                if len(val_prep) < 10:
+                    if not quiet:
+                        print("    Metric skipped: validation set too small after filtering unseen categories")
+                    continue
+                prec = BinaryClassifierPrecisionEfficacy.compute(
+                    real_training_data=train_prep,
+                    synthetic_data=syn_prep,
+                    real_validation_data=val_prep,
+                    metadata=meta_dict,
+                    prediction_column_name=prediction_column,
+                    minority_class_label=effective_minority,
+                    classifier="XGBoost",
+                    fixed_recall_value=0.9,
+                )
+                rec = BinaryClassifierRecallEfficacy.compute(
+                    real_training_data=train_prep,
+                    synthetic_data=syn_prep,
+                    real_validation_data=val_prep,
+                    metadata=meta_dict,
+                    prediction_column_name=prediction_column,
+                    minority_class_label=effective_minority,
+                    classifier="XGBoost",
+                    fixed_precision_value=0.9,
+                )
+                precision_scores.append(float(prec))
+                recall_scores.append(float(rec))
+            except Exception as e:
+                if not quiet:
+                    print(f"    Metric computation failed for one run: {e}")
+
+        import numpy as np
+        result = {}
+        if precision_scores:
+            result["BinaryClassifierPrecisionEfficacy"] = {
+                "mean": float(np.mean(precision_scores)),
+                "std": float(np.std(precision_scores)),
+                "scores": precision_scores,
+            }
+        if recall_scores:
+            result["BinaryClassifierRecallEfficacy"] = {
+                "mean": float(np.mean(recall_scores)),
+                "std": float(np.std(recall_scores)),
+                "scores": recall_scores,
+            }
+        return result
+    finally:
+        if da_base is not None and _orig_init is not None:
+            da_base.ClassifierTrainer.__init__ = _orig_init
 
 
 def _compute_ml_regression_metrics(
@@ -881,6 +914,7 @@ def _compute_ml_regression_metrics(
     real_validation_data: pd.DataFrame,
     metadata: object,
     prediction_column: str,
+    ml_max_epochs: int | None = None,
     quiet: bool = False,
 ) -> dict:
     """Compute regression ML efficacy metrics (LinearRegression, MLPRegressor) across K synthetic datasets.
@@ -888,9 +922,11 @@ def _compute_ml_regression_metrics(
     Follows the SDMetrics regression API:
       https://docs.sdv.dev/sdmetrics/data-metrics/metrics-in-beta/ml-efficacy-single-table/regression
     Uses a TSTR setup: train on synthetic, test on real validation data.
+    ml_max_epochs: if set, overrides MLPRegressor max_iter (SDMetrics defaults to 50).
     """
     try:
         from sdmetrics.single_table import LinearRegression, MLPRegressor
+        from sdmetrics.single_table.efficacy import regression as _regression_module
     except ImportError as e:
         if not quiet:
             print(f"  Skipping ML regression eval: {e}")
@@ -907,50 +943,63 @@ def _compute_ml_regression_metrics(
     else:
         meta_dict = metadata
 
-    lr_scores: list[float] = []
-    mlp_scores: list[float] = []
-
-    for syn in synthetic_list:
-        try:
-            # Train on synthetic, test on real validation data.
-            lr = LinearRegression.compute(
-                test_data=real_validation_data,
-                train_data=syn,
-                target=prediction_column,
-                metadata=meta_dict,
-            )
-            lr_scores.append(float(lr))
-        except Exception as e:
-            if not quiet:
-                print(f"    LinearRegression efficacy failed for one run: {e}")
-
-        try:
-            mlp = MLPRegressor.compute(
-                test_data=real_validation_data,
-                train_data=syn,
-                target=prediction_column,
-                metadata=meta_dict,
-            )
-            mlp_scores.append(float(mlp))
-        except Exception as e:
-            if not quiet:
-                print(f"    MLPRegressor efficacy failed for one run: {e}")
-
-    import numpy as np
-    result: dict = {}
-    if lr_scores:
-        result["LinearRegression"] = {
-            "mean": float(np.mean(lr_scores)),
-            "std": float(np.std(lr_scores)),
-            "scores": lr_scores,
+    # SDMetrics MLPRegressor uses MODEL_KWARGS = {'max_iter': 50}. Override when --eval-ml-max-epochs is set.
+    _orig_mlp_kwargs = None
+    if ml_max_epochs is not None:
+        _orig_mlp_kwargs = _regression_module.MLPRegressor.MODEL_KWARGS
+        _regression_module.MLPRegressor.MODEL_KWARGS = {
+            **(dict(_orig_mlp_kwargs) if _orig_mlp_kwargs else {}),
+            'max_iter': ml_max_epochs,
         }
-    if mlp_scores:
-        result["MLPRegressor"] = {
-            "mean": float(np.mean(mlp_scores)),
-            "std": float(np.std(mlp_scores)),
-            "scores": mlp_scores,
-        }
-    return result
+
+    try:
+        lr_scores: list[float] = []
+        mlp_scores: list[float] = []
+
+        for syn in synthetic_list:
+            try:
+                # Train on synthetic, test on real validation data.
+                lr = LinearRegression.compute(
+                    test_data=real_validation_data,
+                    train_data=syn,
+                    target=prediction_column,
+                    metadata=meta_dict,
+                )
+                lr_scores.append(float(lr))
+            except Exception as e:
+                if not quiet:
+                    print(f"    LinearRegression efficacy failed for one run: {e}")
+
+            try:
+                mlp = MLPRegressor.compute(
+                    test_data=real_validation_data,
+                    train_data=syn,
+                    target=prediction_column,
+                    metadata=meta_dict,
+                )
+                mlp_scores.append(float(mlp))
+            except Exception as e:
+                if not quiet:
+                    print(f"    MLPRegressor efficacy failed for one run: {e}")
+
+        import numpy as np
+        result: dict = {}
+        if lr_scores:
+            result["LinearRegression"] = {
+                "mean": float(np.mean(lr_scores)),
+                "std": float(np.std(lr_scores)),
+                "scores": lr_scores,
+            }
+        if mlp_scores:
+            result["MLPRegressor"] = {
+                "mean": float(np.mean(mlp_scores)),
+                "std": float(np.std(mlp_scores)),
+                "scores": mlp_scores,
+            }
+        return result
+    finally:
+        if _orig_mlp_kwargs is not None:
+            _regression_module.MLPRegressor.MODEL_KWARGS = _orig_mlp_kwargs
 
 
 def _compute_privacy_metrics(
@@ -1326,6 +1375,7 @@ def _train_synthesizers(
     stratify_column: str | None = None,
     eval_plot_format: str = "pdf",
     eval_ml_augmentation: bool = False,
+    eval_ml_max_epochs: int | None = None,
     eval_k_runs: int = 5,
     test_data: pd.DataFrame | None = None,
     prediction_column: str | None = None,
@@ -1435,6 +1485,7 @@ def _train_synthesizers(
                         real_validation_data=test_data.copy(),
                         metadata=metadata,
                         prediction_column=prediction_column,
+                        ml_max_epochs=eval_ml_max_epochs,
                         quiet=quiet,
                     )
                 elif minority_class_label is not None:
@@ -1448,6 +1499,7 @@ def _train_synthesizers(
                         prediction_column=prediction_column,
                         minority_class_label=minority_class_label,
                         ml_label_encode=eval_ml_label_encode,
+                        ml_max_epochs=eval_ml_max_epochs,
                         quiet=quiet,
                     )
                 if metrics:

@@ -27,6 +27,7 @@ SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/s
 EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (column + pair) per subsample
 EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
+EVAL_ML_MAX_EPOCHS=""   # optional: set to "--eval-ml-max-epochs 200" for XGBoost n_estimators in ML augmentation evaluation
 EVAL_PRIVACY="--eval-privacy"   # add "--eval-privacy" to evaluate privacy metrics
 EVAL_PRIVACY_SUBSAMPLE=""      # optional: set to "--eval-privacy-subsample 500" for faster computation
 EVAL_QUALITY="--eval-quality"   # add "--eval-quality" to evaluate ContingencySimilarity for column pairs
@@ -62,6 +63,7 @@ python3 tabular_evaluation.py \
   $EVAL_VISUALIZATIONS \
   $EVAL_PLOT_FORMAT \
   $EVAL_ML_AUGMENTATION \
+  $EVAL_ML_MAX_EPOCHS \
   $EVAL_PRIVACY \
   $EVAL_PRIVACY_SUBSAMPLE \
   $EVAL_QUALITY \
