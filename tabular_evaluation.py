@@ -151,6 +151,18 @@ def parse_args():
         action="store_true",
         help="Label-encode categorical columns to int before ML augmentation (fixes XGBoost 'enable_categorical' error with many categorical features).",
     )
+    parser.add_argument(
+        "--eval-privacy",
+        action="store_true",
+        help="Evaluate DCRBaselineProtection privacy metric (requires --train-synthesizer). See https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection",
+    )
+    parser.add_argument(
+        "--eval-privacy-subsample",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Subsample N rows when computing DCRBaselineProtection to speed up on large datasets.",
+    )
 
     # Misc
     parser.add_argument(
@@ -387,6 +399,8 @@ def run(args) -> dict:
             prediction_column=pred_col,
             minority_class_label=args.minority_class_label,
             eval_ml_label_encode=args.ml_label_encode,
+            eval_privacy=args.eval_privacy,
+            eval_privacy_subsample=args.eval_privacy_subsample,
         )
 
     return result
@@ -774,6 +788,60 @@ def _compute_ml_augmentation_metrics(
     return result
 
 
+def _compute_privacy_metrics(
+    real_data: pd.DataFrame,
+    synthetic_list: list[pd.DataFrame],
+    metadata: object,
+    num_rows_subsample: int | None = None,
+    quiet: bool = False,
+) -> dict:
+    """Compute DCRBaselineProtection privacy metric across K synthetic datasets.
+    Returns mean±std and per-run scores. See:
+    https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection
+    """
+    try:
+        from sdmetrics.single_table import DCRBaselineProtection
+    except ImportError as e:
+        if not quiet:
+            print(f"  Skipping privacy eval: {e}")
+        return {}
+
+    meta_dict = metadata._convert_to_single_table().to_dict() if hasattr(metadata, "_convert_to_single_table") else metadata
+
+    scores = []
+    breakdowns = []
+    for syn in synthetic_list:
+        try:
+            result = DCRBaselineProtection.compute_breakdown(
+                real_data=real_data,
+                synthetic_data=syn,
+                metadata=meta_dict,
+                num_rows_subsample=num_rows_subsample,
+            )
+            if isinstance(result, dict):
+                score_val = result.get("score")
+            else:
+                score_val = float(result)
+            if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)):
+                scores.append(float(score_val))
+                breakdowns.append(result)
+        except Exception as e:
+            if not quiet:
+                print(f"    DCRBaselineProtection failed for one run: {e}")
+
+    import numpy as np
+    out = {}
+    if scores:
+        out["DCRBaselineProtection"] = {
+            "mean": float(np.mean(scores)),
+            "std": float(np.std(scores)),
+            "scores": scores,
+        }
+        if breakdowns and isinstance(breakdowns[0], dict) and "median_DCR_to_real_data" in breakdowns[0]:
+            out["DCRBaselineProtection"]["median_DCR_to_real_data"] = breakdowns[0]["median_DCR_to_real_data"]
+    return out
+
+
 def _train_synthesizers(
     stratified_subsamples: dict,
     synthesizer_name: str,
@@ -795,6 +863,8 @@ def _train_synthesizers(
     prediction_column: str | None = None,
     minority_class_label: str | int | None = None,
     eval_ml_label_encode: bool = False,
+    eval_privacy: bool = False,
+    eval_privacy_subsample: int | None = None,
 ) -> None:
     """Train SDV synthesizer on each subsample and generate synthetic data of same size.
     When eval_ml_augmentation=True, trains K times per subsample and evaluates with mean±std."""
@@ -823,6 +893,7 @@ def _train_synthesizers(
 
     k_runs = max(1, eval_k_runs)
     ml_results = {}
+    privacy_results = {}
     synthetic_by_subsample = {}
 
     # Suppress SDV's "save metadata" UserWarning since we save it ourselves below
@@ -892,6 +963,23 @@ def _train_synthesizers(
                         for m, v in metrics.items():
                             print(f"    {m}: {v['mean']:.4f} ± {v['std']:.4f}")
 
+            if eval_privacy and synthetic_list:
+                if quiet is False:
+                    print(f"  {name}: evaluating DCRBaselineProtection privacy (K={k_runs})...")
+                privacy_metrics = _compute_privacy_metrics(
+                    real_data=subsample_df,
+                    synthetic_list=synthetic_list,
+                    metadata=metadata,
+                    num_rows_subsample=eval_privacy_subsample,
+                    quiet=quiet,
+                )
+                if privacy_metrics:
+                    privacy_results[name] = privacy_metrics
+                    if quiet is False:
+                        for m, v in privacy_metrics.items():
+                            if "mean" in v and "std" in v:
+                                print(f"    {m}: {v['mean']:.4f} ± {v['std']:.4f}")
+
             if comparative_plots and synthetic_list:
                 synthetic_by_subsample[name] = synthetic_list
 
@@ -919,6 +1007,22 @@ def _train_synthesizers(
             json.dump(dumpable, f, indent=2)
         if quiet is False:
             print(f"ML augmentation results saved to {eval_path}")
+
+    if privacy_results:
+        import json
+        privacy_path = synthetic_dir / "privacy_eval.json"
+        dumpable = {}
+        for name, m in privacy_results.items():
+            dumpable[name] = {}
+            for k, v in m.items():
+                entry = {"mean": v["mean"], "std": v["std"], "scores": v["scores"]}
+                if "median_DCR_to_real_data" in v:
+                    entry["median_DCR_to_real_data"] = v["median_DCR_to_real_data"]
+                dumpable[name][k] = entry
+        with open(privacy_path, "w") as f:
+            json.dump(dumpable, f, indent=2)
+        if quiet is False:
+            print(f"Privacy evaluation results saved to {privacy_path}")
 
     if quiet is False:
         print(f"Synthetic data saved to {synthetic_dir}")
