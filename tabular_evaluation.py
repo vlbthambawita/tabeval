@@ -1014,12 +1014,14 @@ def _compute_quality_metrics(
     correlation_threshold: float | None = None,
     quiet: bool = False,
 ) -> dict:
-    """Compute ContingencySimilarity (categorical/mixed) and CorrelationSimilarity (numerical pairs).
-    See: https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity
+    """Compute KSComplement (numerical marginals), ContingencySimilarity, CorrelationSimilarity.
+    See: https://docs.sdv.dev/sdmetrics/data-metrics/quality/kscomplement
+         https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity
          https://docs.sdv.dev/sdmetrics/data-metrics/quality/correlationsimilarity
     """
     try:
         from sdmetrics.column_pairs import ContingencySimilarity, CorrelationSimilarity
+        from sdmetrics.single_column import KSComplement
         import itertools
         import numpy as np
     except ImportError as e:
@@ -1028,10 +1030,50 @@ def _compute_quality_metrics(
         return {}
 
     cols = list(real_data.columns)
-    if len(cols) < 2:
-        return {}
-
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(real_data[c])]
     out = {}
+
+    # KSComplement: numerical columns only (marginal distribution similarity)
+    if numeric_cols:
+        ks_scores_by_col = {c: [] for c in numeric_cols}
+        for syn in synthetic_list:
+            for c in numeric_cols:
+                try:
+                    real_vals = real_data[c].dropna()
+                    syn_vals = syn[c].dropna()
+                    if len(real_vals) < 2 or len(syn_vals) < 2:
+                        continue
+                    if num_rows_subsample and len(real_vals) > num_rows_subsample:
+                        real_vals = real_vals.sample(n=num_rows_subsample, random_state=42)
+                    if num_rows_subsample and len(syn_vals) > num_rows_subsample:
+                        syn_vals = syn_vals.sample(n=num_rows_subsample, random_state=42)
+                    score = KSComplement.compute(
+                        real_data=real_vals,
+                        synthetic_data=syn_vals,
+                    )
+                    if score is not None and not (isinstance(score, float) and pd.isna(score)):
+                        ks_scores_by_col[c].append(float(score))
+                except Exception:
+                    pass
+
+        valid_ks_cols = {c: s for c, s in ks_scores_by_col.items() if s}
+        if valid_ks_cols:
+            all_ks_scores = []
+            col_means = {}
+            for col, run_scores in valid_ks_cols.items():
+                col_means[col] = float(np.mean(run_scores))
+                all_ks_scores.extend(run_scores)
+            out["KSComplement"] = {
+                "mean": float(np.mean(all_ks_scores)),
+                "std": float(np.std(all_ks_scores)) if len(all_ks_scores) > 1 else 0.0,
+                "scores": [float(s) for s in all_ks_scores],
+                "num_columns": len(valid_ks_cols),
+                "total_columns": len(numeric_cols),
+                "column_means": col_means,
+            }
+
+    if len(cols) < 2:
+        return out
 
     # ContingencySimilarity: categorical/mixed pairs
     continuous_cols = [
@@ -1084,7 +1126,6 @@ def _compute_quality_metrics(
         }
 
     # CorrelationSimilarity: numerical pairs only
-    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(real_data[c])]
     num_pairs = list(itertools.combinations(numeric_cols, 2))
     if not num_pairs:
         return out
@@ -1295,7 +1336,7 @@ def _train_synthesizers(
 
             if eval_quality and synthetic_list:
                 if quiet is False:
-                    print(f"  {name}: evaluating quality (ContingencySimilarity, CorrelationSimilarity) (K={k_runs})...")
+                    print(f"  {name}: evaluating quality (KSComplement, ContingencySimilarity, CorrelationSimilarity) (K={k_runs})...")
                 quality_metrics = _compute_quality_metrics(
                     real_data=subsample_df,
                     synthetic_list=synthetic_list,
@@ -1369,13 +1410,20 @@ def _train_synthesizers(
         for name, m in quality_results.items():
             dumpable[name] = {}
             for k, v in m.items():
-                entry = {"mean": v["mean"], "std": v["std"], "scores": v["scores"]}
+                # Do not store raw per-run scores; keep only summary statistics.
+                entry = {"mean": v["mean"], "std": v["std"]}
                 if "num_pairs" in v:
                     entry["num_pairs"] = v["num_pairs"]
                 if "total_pairs" in v:
                     entry["total_pairs"] = v["total_pairs"]
                 if "pair_means" in v:
                     entry["pair_means"] = v["pair_means"]
+                if "num_columns" in v:
+                    entry["num_columns"] = v["num_columns"]
+                if "total_columns" in v:
+                    entry["total_columns"] = v["total_columns"]
+                if "column_means" in v:
+                    entry["column_means"] = v["column_means"]
                 if "coefficient" in v:
                     entry["coefficient"] = v["coefficient"]
                 dumpable[name][k] = entry
