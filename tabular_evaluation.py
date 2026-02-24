@@ -154,7 +154,7 @@ def parse_args():
     parser.add_argument(
         "--eval-privacy",
         action="store_true",
-        help="Evaluate privacy metrics: DCRBaselineProtection and DCROverfittingProtection (requires --train-synthesizer). Uses held-out test set for DCROverfittingProtection.",
+        help="Evaluate privacy metrics: DCRBaselineProtection, DCROverfittingProtection, and optionally DisclosureProtection (requires --train-synthesizer). Use --eval-privacy-disclosure to enable DisclosureProtection.",
     )
     parser.add_argument(
         "--eval-privacy-subsample",
@@ -162,6 +162,38 @@ def parse_args():
         default=None,
         metavar="N",
         help="Subsample N rows when computing DCRBaselineProtection to speed up on large datasets.",
+    )
+    parser.add_argument(
+        "--eval-privacy-disclosure",
+        action="store_true",
+        help="Enable DisclosureProtection evaluation. Requires --eval-privacy-disclosure-known and --eval-privacy-disclosure-sensitive.",
+    )
+    parser.add_argument(
+        "--eval-privacy-disclosure-known",
+        type=str,
+        default=None,
+        metavar="COL1,COL2,...",
+        help="Comma-separated column names the attacker knows (for DisclosureProtection). Use with --eval-privacy-disclosure.",
+    )
+    parser.add_argument(
+        "--eval-privacy-disclosure-sensitive",
+        type=str,
+        default=None,
+        metavar="COL1,COL2,...",
+        help="Comma-separated column names the attacker wants to guess (for DisclosureProtection). Use with --eval-privacy-disclosure.",
+    )
+    parser.add_argument(
+        "--eval-privacy-disclosure-continuous",
+        type=str,
+        default=None,
+        metavar="COL1,COL2,...",
+        help="Comma-separated continuous column names needing discretization (for DisclosureProtection).",
+    )
+    parser.add_argument(
+        "--eval-privacy-disclosure-computation",
+        choices=["cap", "generalized_cap", "zero_cap"],
+        default="cap",
+        help="CAP computation method for DisclosureProtection (default: cap).",
     )
 
     # Misc
@@ -378,6 +410,10 @@ def run(args) -> dict:
                 "--eval-ml-augmentation requires --minority-class-label "
                 f"(e.g. one value from {args.stratify_column} column)"
             )
+        if args.eval_privacy_disclosure and (not args.eval_privacy_disclosure_known or not args.eval_privacy_disclosure_sensitive):
+            raise ValueError(
+                "--eval-privacy-disclosure requires --eval-privacy-disclosure-known and --eval-privacy-disclosure-sensitive"
+            )
         _train_synthesizers(
             stratified_subsamples=stratified_subsamples,
             synthesizer_name=args.train_synthesizer,
@@ -401,6 +437,11 @@ def run(args) -> dict:
             eval_ml_label_encode=args.ml_label_encode,
             eval_privacy=args.eval_privacy,
             eval_privacy_subsample=args.eval_privacy_subsample,
+            eval_privacy_disclosure=args.eval_privacy_disclosure,
+            eval_privacy_disclosure_known=args.eval_privacy_disclosure_known,
+            eval_privacy_disclosure_sensitive=args.eval_privacy_disclosure_sensitive,
+            eval_privacy_disclosure_continuous=args.eval_privacy_disclosure_continuous,
+            eval_privacy_disclosure_computation=args.eval_privacy_disclosure_computation,
         )
 
     return result
@@ -794,15 +835,20 @@ def _compute_privacy_metrics(
     metadata: object,
     num_rows_subsample: int | None = None,
     real_validation_data: pd.DataFrame | None = None,
+    disclosure_known_columns: list[str] | None = None,
+    disclosure_sensitive_columns: list[str] | None = None,
+    disclosure_continuous_columns: list[str] | None = None,
+    disclosure_computation: str = "cap",
     quiet: bool = False,
 ) -> dict:
     """Compute privacy metrics across K synthetic datasets.
     - DCRBaselineProtection: https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcrbaselineprotection
     - DCROverfittingProtection: https://docs.sdv.dev/sdmetrics/data-metrics/privacy/dcroverfittingprotection
-      (requires real_validation_data - holdout set not used for training)
+    - DisclosureProtection: https://docs.sdv.dev/sdmetrics/data-metrics/privacy/disclosureprotection
+      (requires disclosure_known_columns and disclosure_sensitive_columns)
     Returns mean±std and per-run scores for each metric."""
     try:
-        from sdmetrics.single_table import DCRBaselineProtection, DCROverfittingProtection
+        from sdmetrics.single_table import DCRBaselineProtection, DCROverfittingProtection, DisclosureProtection
     except ImportError as e:
         if not quiet:
             print(f"  Skipping privacy eval: {e}")
@@ -877,6 +923,48 @@ def _compute_privacy_metrics(
             if breakdowns_overfit and isinstance(breakdowns_overfit[0], dict) and "synthetic_data_percentages" in breakdowns_overfit[0]:
                 out["DCROverfittingProtection"]["synthetic_data_percentages"] = breakdowns_overfit[0]["synthetic_data_percentages"]
 
+    # DisclosureProtection (requires known_columns and sensitive_columns)
+    if (
+        disclosure_known_columns
+        and disclosure_sensitive_columns
+        and set(disclosure_known_columns + disclosure_sensitive_columns).issubset(real_data.columns)
+    ):
+        scores_disc = []
+        breakdowns_disc = []
+        for syn in synthetic_list:
+            try:
+                result = DisclosureProtection.compute_breakdown(
+                    real_data=real_data,
+                    synthetic_data=syn,
+                    known_column_names=disclosure_known_columns,
+                    sensitive_column_names=disclosure_sensitive_columns,
+                    continuous_column_names=disclosure_continuous_columns,
+                    computation_method=disclosure_computation,
+                )
+                if isinstance(result, dict):
+                    score_val = result.get("score")
+                else:
+                    score_val = float(result)
+                if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)):
+                    scores_disc.append(float(score_val))
+                    breakdowns_disc.append(result)
+            except Exception as e:
+                if not quiet:
+                    print(f"    DisclosureProtection failed for one run: {e}")
+
+        if scores_disc:
+            out["DisclosureProtection"] = {
+                "mean": float(np.mean(scores_disc)),
+                "std": float(np.std(scores_disc)),
+                "scores": scores_disc,
+            }
+            if breakdowns_disc and isinstance(breakdowns_disc[0], dict):
+                b = breakdowns_disc[0]
+                if "cap_protection" in b:
+                    out["DisclosureProtection"]["cap_protection"] = b["cap_protection"]
+                if "baseline_protection" in b:
+                    out["DisclosureProtection"]["baseline_protection"] = b["baseline_protection"]
+
     return out
 
 
@@ -903,6 +991,11 @@ def _train_synthesizers(
     eval_ml_label_encode: bool = False,
     eval_privacy: bool = False,
     eval_privacy_subsample: int | None = None,
+    eval_privacy_disclosure: bool = False,
+    eval_privacy_disclosure_known: str | None = None,
+    eval_privacy_disclosure_sensitive: str | None = None,
+    eval_privacy_disclosure_continuous: str | None = None,
+    eval_privacy_disclosure_computation: str = "cap",
 ) -> None:
     """Train SDV synthesizer on each subsample and generate synthetic data of same size.
     When eval_ml_augmentation=True, trains K times per subsample and evaluates with mean±std."""
@@ -1003,13 +1096,22 @@ def _train_synthesizers(
 
             if eval_privacy and synthetic_list:
                 if quiet is False:
-                    print(f"  {name}: evaluating privacy (DCRBaselineProtection, DCROverfittingProtection) (K={k_runs})...")
+                    msg = "  {name}: evaluating privacy (DCRBaselineProtection, DCROverfittingProtection"
+                    if eval_privacy_disclosure and eval_privacy_disclosure_known and eval_privacy_disclosure_sensitive:
+                        msg += ", DisclosureProtection"
+                    msg += f") (K={k_runs})..."
+                    print(msg.format(name=name))
+                _parse_csv = lambda s: [c.strip() for c in s.split(",") if c.strip()] if s else None
                 privacy_metrics = _compute_privacy_metrics(
                     real_data=subsample_df,
                     synthetic_list=synthetic_list,
                     metadata=metadata,
                     num_rows_subsample=eval_privacy_subsample,
                     real_validation_data=test_data.copy() if test_data is not None else None,
+                    disclosure_known_columns=_parse_csv(eval_privacy_disclosure_known) if eval_privacy_disclosure else None,
+                    disclosure_sensitive_columns=_parse_csv(eval_privacy_disclosure_sensitive) if eval_privacy_disclosure else None,
+                    disclosure_continuous_columns=_parse_csv(eval_privacy_disclosure_continuous) if eval_privacy_disclosure else None,
+                    disclosure_computation=eval_privacy_disclosure_computation if eval_privacy_disclosure else "cap",
                     quiet=quiet,
                 )
                 if privacy_metrics:
@@ -1059,6 +1161,10 @@ def _train_synthesizers(
                     entry["median_DCR_to_real_data"] = v["median_DCR_to_real_data"]
                 if "synthetic_data_percentages" in v:
                     entry["synthetic_data_percentages"] = v["synthetic_data_percentages"]
+                if "cap_protection" in v:
+                    entry["cap_protection"] = v["cap_protection"]
+                if "baseline_protection" in v:
+                    entry["baseline_protection"] = v["baseline_protection"]
                 dumpable[name][k] = entry
         with open(privacy_path, "w") as f:
             json.dump(dumpable, f, indent=2)

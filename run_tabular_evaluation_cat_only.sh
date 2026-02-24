@@ -27,8 +27,13 @@ SAVE_SYNTHETIC="--save-synthetic"   # add to save synthetic datasets to output/s
 EVAL_VISUALIZATIONS="--eval-visualizations"  # add to generate SDV eval plots (column + pair) per subsample
 EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
-EVAL_PRIVACY="--eval-privacy"   # add "--eval-privacy" to evaluate DCRBaselineProtection privacy metric
-EVAL_PRIVACY_SUBSAMPLE=""      # optional: set to "--eval-privacy-subsample 500" for faster computation on large datasets
+EVAL_PRIVACY="--eval-privacy"   # add "--eval-privacy" to evaluate privacy metrics
+EVAL_PRIVACY_SUBSAMPLE=""      # optional: set to "--eval-privacy-subsample 500" for faster computation
+# DisclosureProtection (optional): set EVAL_PRIVACY_DISCLOSURE="--eval-privacy-disclosure" to enable
+EVAL_PRIVACY_DISCLOSURE="--eval-privacy-disclosure"     # set to "--eval-privacy-disclosure" to evaluate DisclosureProtection
+EVAL_PRIVACY_DISCLOSURE_KNOWN="--eval-privacy-disclosure-known Disease"       # e.g. "--eval-privacy-disclosure-known Age" (required if EVAL_PRIVACY_DISCLOSURE is set)
+EVAL_PRIVACY_DISCLOSURE_SENSITIVE="--eval-privacy-disclosure-sensitive Age"   # e.g. "--eval-privacy-disclosure-sensitive Disease" (required if EVAL_PRIVACY_DISCLOSURE is set)
+EVAL_PRIVACY_DISCLOSURE_CONTINUOUS=""  # optional: continuous cols needing discretization
 EVAL_K_RUNS="--eval-k-runs 5"   # K training runs per subsample (saves *_synthetic_run0.csv, run1.csv, etc.); use with EVAL_ML_AUGMENTATION for mean±std
 PREDICTION_COLUMN="--prediction-column Sick"   # add "--prediction-column Disease" for ML augmentation (default: stratify column)
 MINORITY_CLASS="--minority-class-label yes"   # add "--minority-class-label Fallot" (or other class from prediction column)
@@ -57,6 +62,10 @@ python3 tabular_evaluation.py \
   $EVAL_ML_AUGMENTATION \
   $EVAL_PRIVACY \
   $EVAL_PRIVACY_SUBSAMPLE \
+  $EVAL_PRIVACY_DISCLOSURE \
+  $EVAL_PRIVACY_DISCLOSURE_KNOWN \
+  $EVAL_PRIVACY_DISCLOSURE_SENSITIVE \
+  $EVAL_PRIVACY_DISCLOSURE_CONTINUOUS \
   $EVAL_K_RUNS \
   $PREDICTION_COLUMN \
   $MINORITY_CLASS \
