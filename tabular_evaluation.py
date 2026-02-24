@@ -1014,14 +1014,22 @@ def _compute_quality_metrics(
     correlation_threshold: float | None = None,
     quiet: bool = False,
 ) -> dict:
-    """Compute KSComplement (numerical marginals), ContingencySimilarity, CorrelationSimilarity.
-    See: https://docs.sdv.dev/sdmetrics/data-metrics/quality/kscomplement
-         https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity
-         https://docs.sdv.dev/sdmetrics/data-metrics/quality/correlationsimilarity
+    """Compute KSComplement/TVComplement (marginals) + pairwise quality metrics.
+
+    KSComplement: numerical marginals
+    TVComplement: categorical/boolean marginals
+    ContingencySimilarity: categorical/mixed column pairs (2D distributions)
+    CorrelationSimilarity: numerical column pairs (correlations)
+
+    See:
+      https://docs.sdv.dev/sdmetrics/data-metrics/quality/kscomplement
+      https://docs.sdv.dev/sdmetrics/data-metrics/quality/tvcomplement
+      https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity
+      https://docs.sdv.dev/sdmetrics/data-metrics/quality/correlationsimilarity
     """
     try:
         from sdmetrics.column_pairs import ContingencySimilarity, CorrelationSimilarity
-        from sdmetrics.single_column import KSComplement
+        from sdmetrics.single_column import KSComplement, TVComplement
         import itertools
         import numpy as np
     except ImportError as e:
@@ -1069,6 +1077,46 @@ def _compute_quality_metrics(
                 "scores": [float(s) for s in all_ks_scores],
                 "num_columns": len(valid_ks_cols),
                 "total_columns": len(numeric_cols),
+                "column_means": col_means,
+            }
+
+    # TVComplement: categorical/boolean columns only (marginal distribution similarity)
+    cat_cols = [c for c in cols if not pd.api.types.is_numeric_dtype(real_data[c])]
+    if cat_cols:
+        tv_scores_by_col = {c: [] for c in cat_cols}
+        for syn in synthetic_list:
+            for c in cat_cols:
+                try:
+                    real_vals = real_data[c].dropna()
+                    syn_vals = syn[c].dropna()
+                    if len(real_vals) == 0 or len(syn_vals) == 0:
+                        continue
+                    if num_rows_subsample and len(real_vals) > num_rows_subsample:
+                        real_vals = real_vals.sample(n=num_rows_subsample, random_state=42)
+                    if num_rows_subsample and len(syn_vals) > num_rows_subsample:
+                        syn_vals = syn_vals.sample(n=num_rows_subsample, random_state=42)
+                    score = TVComplement.compute(
+                        real_data=real_vals,
+                        synthetic_data=syn_vals,
+                    )
+                    if score is not None and not (isinstance(score, float) and pd.isna(score)):
+                        tv_scores_by_col[c].append(float(score))
+                except Exception:
+                    pass
+
+        valid_tv_cols = {c: s for c, s in tv_scores_by_col.items() if s}
+        if valid_tv_cols:
+            all_tv_scores = []
+            col_means = {}
+            for col, run_scores in valid_tv_cols.items():
+                col_means[col] = float(np.mean(run_scores))
+                all_tv_scores.extend(run_scores)
+            out["TVComplement"] = {
+                "mean": float(np.mean(all_tv_scores)),
+                "std": float(np.std(all_tv_scores)) if len(all_tv_scores) > 1 else 0.0,
+                "scores": [float(s) for s in all_tv_scores],
+                "num_columns": len(valid_tv_cols),
+                "total_columns": len(cat_cols),
                 "column_means": col_means,
             }
 
