@@ -29,6 +29,8 @@ EVAL_PLOT_FORMAT="--eval-plot-format pdf"   # pdf or png
 EVAL_ML_AUGMENTATION="--eval-ml-augmentation"   # add "--eval-ml-augmentation" to evaluate BinaryClassifierPrecision/RecallEfficacy
 EVAL_PRIVACY="--eval-privacy"   # add "--eval-privacy" to evaluate privacy metrics
 EVAL_PRIVACY_SUBSAMPLE=""      # optional: set to "--eval-privacy-subsample 500" for faster computation
+EVAL_QUALITY="--eval-quality"   # add "--eval-quality" to evaluate ContingencySimilarity for column pairs
+EVAL_QUALITY_SUBSAMPLE=""      # optional: set to "--eval-quality-subsample 500" for faster computation
 # DisclosureProtection (optional): set EVAL_PRIVACY_DISCLOSURE="--eval-privacy-disclosure" to enable
 EVAL_PRIVACY_DISCLOSURE=""     # set to "--eval-privacy-disclosure" to evaluate DisclosureProtection
 EVAL_PRIVACY_DISCLOSURE_KNOWN=""       # e.g. "--eval-privacy-disclosure-known col1,col2" (required if EVAL_PRIVACY_DISCLOSURE is set)
@@ -62,6 +64,8 @@ python3 tabular_evaluation.py \
   $EVAL_ML_AUGMENTATION \
   $EVAL_PRIVACY \
   $EVAL_PRIVACY_SUBSAMPLE \
+  $EVAL_QUALITY \
+  $EVAL_QUALITY_SUBSAMPLE \
   $EVAL_PRIVACY_DISCLOSURE \
   $EVAL_PRIVACY_DISCLOSURE_KNOWN \
   $EVAL_PRIVACY_DISCLOSURE_SENSITIVE \
