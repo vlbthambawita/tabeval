@@ -2,6 +2,60 @@
 
 A Python pipeline for evaluating synthetic tabular data generation. It loads tabular datasets, creates stratified train/test splits, trains SDV (Synthetic Data Vault) synthesizers on subsamples, generates synthetic data, and evaluates quality via visualizations and ML augmentation metrics.
 
+## Pipeline Overview
+
+```mermaid
+flowchart TD
+    A([Input Data]) --> B{Source}
+    B -->|CSV / Excel| C[Load from file\n--data-path]
+    B -->|SDV demo| D[Load SDV dataset\n--sdv-demo]
+
+    C & D --> E[Stratified Split\n--stratify-column\n--test-size]
+
+    E --> F[Test Set\nheld-out]
+    E --> G[Train Set]
+
+    G --> H[Subsampling\n--subsample-sizes]
+    H --> I[Subsample 1\ne.g. 400 rows]
+    H --> J[Subsample 2\ne.g. 200 rows]
+    H --> K[...]
+
+    I & J & K --> L{Synthesizer\n--train-synthesizer}
+    L -->|gaussian_copula| M[GaussianCopula]
+    L -->|ctgan| N[CTGAN]
+    L -->|tvae| O[TVAE]
+
+    M & N & O --> P[Synthetic Data Generation\n--eval-k-runs K runs per subsample]
+
+    P --> Q[Evaluation]
+
+    Q --> R[Visualizations\n--comparative-plots\n--eval-visualizations]
+    Q --> S[ML Augmentation\n--eval-ml-augmentation]
+    Q --> T[Privacy Metrics\n--eval-privacy]
+    Q --> U[Quality Metrics\n--eval-quality]
+
+    R --> R1[Bar plots per subsample\nComparative plots\nReal vs Synthetic KDE/bar]
+
+    S --> S2{Target type}
+    S2 -->|Categorical| S3[BinaryClassifier\nPrecision & Recall Efficacy]
+    S2 -->|Numerical| S4[LinearRegression &\nMLPRegressor Efficacy]
+    S3 & S4 --> S5[(ml_augmentation_eval.json\nmean ± std across K runs)]
+
+    T --> T1[DCRBaselineProtection\nDCROverfittingProtection]
+    T --> T2[DisclosureProtection\n--eval-privacy-disclosure]
+    T1 & T2 --> T3[(privacy_eval.json)]
+
+    U --> U1[KSComplement / TVComplement\nmarginal distributions]
+    U --> U2[ContingencySimilarity\ncategorical pairs]
+    U --> U3[CorrelationSimilarity\nnumerical pairs]
+    U1 & U2 & U3 --> U4[(quality_eval.json)]
+
+    style A fill:#4a90d9,color:#fff
+    style Q fill:#f0a500,color:#fff
+    style F fill:#e05c5c,color:#fff
+    style P fill:#5cb85c,color:#fff
+```
+
 ## Quickstart: useful command batches
 
 - **Run full evaluation on Adult-like mixed data (synthetic + ML + privacy + quality)**:
