@@ -1,0 +1,74 @@
+# tabular_evaluation configuration — Adult / Mixed Categorical + Numerical (adult demo)
+# Run with: python tabular_evaluation.py --config config_cat_and_num.yaml
+
+# ---------------------------------------------------------------------------
+# Data source
+# ---------------------------------------------------------------------------
+sdv_demo: true
+sdv_modality: "single_table"
+sdv_dataset: "adult"
+# To use your own CSV instead, comment out the three lines above and set:
+# data_path: "/path/to/your/data.csv"
+
+# ---------------------------------------------------------------------------
+# Stratification & split
+# ---------------------------------------------------------------------------
+stratify_column: "label"
+test_size: 1000
+subsample_sizes: "400,200"
+random_state: 42
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output_dir: "output"
+save_datasets: true
+comparative_plots: true
+
+# ---------------------------------------------------------------------------
+# Synthesizer training
+# ---------------------------------------------------------------------------
+train_synthesizer: "gaussian_copula"   # gaussian_copula | ctgan | tvae
+save_synthetic: true
+synthesizer_epochs: 100                # for CTGAN/TVAE only; ignored for GaussianCopula
+
+# ---------------------------------------------------------------------------
+# Evaluation: distribution visualizations
+# ---------------------------------------------------------------------------
+eval_visualizations: true
+eval_plot_format: "pdf"   # pdf | png
+
+# ---------------------------------------------------------------------------
+# Evaluation: ML augmentation (binary classification)
+# ---------------------------------------------------------------------------
+eval_ml_augmentation: true
+eval_k_runs: 5
+prediction_column: "label"
+minority_class_label: ">50K"
+ml_label_encode: true   # fixes XGBoost "enable_categorical" error with high-cardinality categoricals
+# eval_ml_max_epochs: 100
+
+# ---------------------------------------------------------------------------
+# Evaluation: privacy
+# ---------------------------------------------------------------------------
+eval_privacy: true
+# eval_privacy_subsample: 5000
+eval_privacy_disclosure: false
+# eval_privacy_disclosure_known: "age,gender"
+# eval_privacy_disclosure_sensitive: "label"
+# eval_privacy_disclosure_continuous: "age"
+eval_privacy_disclosure_computation: "cap"   # cap | generalized_cap | zero_cap
+
+# ---------------------------------------------------------------------------
+# Evaluation: quality
+# ---------------------------------------------------------------------------
+eval_quality: true
+# eval_quality_subsample: 5000
+# eval_quality_threshold: 0.3
+eval_quality_correlation_coefficient: "Pearson"   # Pearson | Spearman
+# eval_quality_correlation_threshold: 0.4
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+quiet: false

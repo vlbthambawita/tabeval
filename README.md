@@ -7,32 +7,32 @@ A Python pipeline for evaluating synthetic tabular data generation. It loads tab
 ```mermaid
 flowchart TD
     A([Input Data]) --> B{Source}
-    B -->|CSV / Excel| C[Load from file\n--data-path]
-    B -->|SDV demo| D[Load SDV dataset\n--sdv-demo]
+    B -->|CSV / Excel| C[Load from file\ndata_path]
+    B -->|SDV demo| D[Load SDV dataset\nsdv_demo]
 
-    C & D --> E[Stratified Split\n--stratify-column\n--test-size]
+    C & D --> E[Stratified Split\nstratify_column\ntest_size]
 
     E --> F[Test Set\nheld-out]
     E --> G[Train Set]
 
-    G --> H[Subsampling\n--subsample-sizes]
+    G --> H[Subsampling\nsubsample_sizes]
     H --> I[Subsample 1\ne.g. 400 rows]
     H --> J[Subsample 2\ne.g. 200 rows]
     H --> K[...]
 
-    I & J & K --> L{Synthesizer\n--train-synthesizer}
+    I & J & K --> L{Synthesizer\ntrain_synthesizer}
     L -->|gaussian_copula| M[GaussianCopula]
     L -->|ctgan| N[CTGAN]
     L -->|tvae| O[TVAE]
 
-    M & N & O --> P[Synthetic Data Generation\n--eval-k-runs K runs per subsample]
+    M & N & O --> P[Synthetic Data Generation\neval_k_runs K runs per subsample]
 
     P --> Q[Evaluation]
 
-    Q --> R[Visualizations\n--comparative-plots\n--eval-visualizations]
-    Q --> S[ML Augmentation\n--eval-ml-augmentation]
-    Q --> T[Privacy Metrics\n--eval-privacy]
-    Q --> U[Quality Metrics\n--eval-quality]
+    Q --> R[Visualizations\ncomparative_plots\neval_visualizations]
+    Q --> S[ML Augmentation\neval_ml_augmentation]
+    Q --> T[Privacy Metrics\neval_privacy]
+    Q --> U[Quality Metrics\neval_quality]
 
     R --> R1[Bar plots per subsample\nComparative plots\nReal vs Synthetic KDE/bar]
 
@@ -42,7 +42,7 @@ flowchart TD
     S3 & S4 --> S5[(ml_augmentation_eval.json\nmean ± std across K runs)]
 
     T --> T1[DCRBaselineProtection\nDCROverfittingProtection]
-    T --> T2[DisclosureProtection\n--eval-privacy-disclosure]
+    T --> T2[DisclosureProtection\neval_privacy_disclosure]
     T1 & T2 --> T3[(privacy_eval.json)]
 
     U --> U1[KSComplement / TVComplement\nmarginal distributions]
@@ -56,52 +56,59 @@ flowchart TD
     style P fill:#5cb85c,color:#fff
 ```
 
-## Quickstart: useful command batches
+## Quickstart: YAML Config
 
-- **Run full evaluation on Adult-like mixed data (synthetic + ML + privacy + quality)**:
+All runs are configured via a YAML file and launched with a single command:
+
+```bash
+python tabular_evaluation.py --config config.yaml
+```
+
+Three ready-to-use configs are provided for common use cases:
+
+- **Categorical medical/health data** (`child` demo):
 
   ```bash
-  ./run_tabular_evaluation_cat_and_num.sh
+  python tabular_evaluation.py --config config_cat_only.yaml
   ```
 
-- **Run full evaluation on medical-style categorical data (child demo)**:
+- **Text-derived / news data** (`news` demo):
 
   ```bash
-  ./run_tabular_evaluation_cat_only.sh
+  python tabular_evaluation.py --config config_num_only.yaml
   ```
 
-- **Run full evaluation on news/text-style label data (news demo)**:
+- **Mixed categorical + numerical data** (`adult` demo):
 
   ```bash
-  ./run_tabular_evaluation_num_only.sh
+  python tabular_evaluation.py --config config_cat_and_num.yaml
   ```
 
-- **Use your own CSV with the Adult-style config** (replace dataset path and columns as needed):
+CLI arguments always override config file values, so you can override a single key without editing the file:
 
-  ```bash
-  # In run_tabular_evaluation_cat_and_num.sh
-  DATA_SOURCE="--data-path /path/to/your/data.csv"
-  SDV_DATASET="adult"          # unused when --data-path is set
-  STRATIFY_COLUMN="label"      # change to your column
-  PREDICTION_COLUMN="--prediction-column label"
-  MINORITY_CLASS="--minority-class-label >50K"
+```bash
+python tabular_evaluation.py --config config_cat_only.yaml --eval-k-runs 10 --quiet
+```
+
+- **Minimal quality-only evaluation (no ML, no privacy)**:
+
+  ```yaml
+  # minimal_quality.yaml
+  sdv_demo: true
+  sdv_modality: "single_table"
+  sdv_dataset: "adult"
+  stratify_column: "label"
+  test_size: 1000
+  subsample_sizes: "400,200"
+  train_synthesizer: "gaussian_copula"
+  eval_quality: true
+  eval_quality_subsample: 500
+  save_datasets: true
+  output_dir: "output"
   ```
 
-- **Minimal quality-only evaluation from the CLI (no ML, no privacy)**:
-
   ```bash
-  python3 tabular_evaluation.py \
-    --sdv-demo \
-    --sdv-modality single_table \
-    --sdv-dataset adult \
-    --stratify-column label \
-    --test-size 1000 \
-    --subsample-sizes 400,200 \
-    --train-synthesizer gaussian_copula \
-    --eval-quality \
-    --eval-quality-subsample 500 \
-    --save-datasets \
-    -o output
+  python tabular_evaluation.py --config minimal_quality.yaml
   ```
 
 ---
@@ -136,109 +143,102 @@ flowchart TD
 - matplotlib, seaborn (for plots)
 - [SDV](https://github.com/sdv-dev/SDV) (for synthesizers and demo data)
 - xgboost (for ML augmentation metrics)
+- PyYAML (for config file support)
 
 ```bash
-pip install pandas scikit-learn matplotlib seaborn sdv xgboost
+pip install pandas scikit-learn matplotlib seaborn sdv xgboost pyyaml
 ```
 
 ---
 
-## Core Script: `tabular_evaluation.py`
+## YAML Configuration Reference
 
-The main Python script that powers all shell wrappers. It provides:
+All options can be set in a YAML file and passed via `--config`. Keys map directly to CLI flag names with hyphens replaced by underscores (e.g. `--eval-k-runs` → `eval_k_runs`). CLI flags always take precedence over the config file.
 
 ### Data loading and splitting
 
-| Option | Description |
-|--------|-------------|
-| `--data-path PATH` | Load from CSV/Excel file. Supported extensions: `.csv`, `.xlsx`, `.xls`. |
-| `--sdv-demo` | Use an SDV demo dataset instead of a file. |
-| `--sdv-modality` | SDV modality (e.g. `single_table`, `multi_table`). |
-| `--sdv-dataset` | Demo dataset name: `child`, `news`, `adult`, etc. |
-| `--stratify-column` | Column for stratified sampling (also the default prediction target). Numeric columns are automatically binned into quantiles for stable stratification. |
-| `--test-size` | **Number of rows** in the held-out test set (not a fraction). |
-| `--subsample-sizes` | Comma-separated subsample sizes (e.g. `400,200`) drawn from the training set, stratified on `--stratify-column`. |
-| `--random-state` | Random seed for reproducible splits and synthesizer training. |
-| `-o`, `--output-dir` | Base output directory (default: `output`). |
-| `--save-datasets` | Save `train_data.csv`, `test_data.csv`, and all `subsample_*.csv` files. |
-| `-q`, `--quiet` | Reduce console verbosity. |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `data_path` | `--data-path PATH` | Load from CSV/Excel file. Supported extensions: `.csv`, `.xlsx`, `.xls`. |
+| `sdv_demo` | `--sdv-demo` | Use an SDV demo dataset instead of a file. |
+| `sdv_modality` | `--sdv-modality` | SDV modality (e.g. `single_table`, `multi_table`). |
+| `sdv_dataset` | `--sdv-dataset` | Demo dataset name: `child`, `news`, `adult`, etc. |
+| `stratify_column` | `--stratify-column` | Column for stratified sampling (also the default prediction target). Numeric columns are automatically binned into quantiles for stable stratification. |
+| `test_size` | `--test-size` | **Number of rows** in the held-out test set (not a fraction). |
+| `subsample_sizes` | `--subsample-sizes` | Comma-separated subsample sizes (e.g. `"400,200"`) drawn from the training set, stratified on `stratify_column`. |
+| `random_state` | `--random-state` | Random seed for reproducible splits and synthesizer training. |
+| `output_dir` | `-o` / `--output-dir` | Base output directory (default: `output`). |
+| `save_datasets` | `--save-datasets` | Save `train_data.csv`, `test_data.csv`, and all `subsample_*.csv` files. |
+| `quiet` | `-q` / `--quiet` | Reduce console verbosity. |
 
 ### Basic plots and comparative plots
 
-| Option | Description |
-|--------|-------------|
-| `--no-plots` | Skip per-subsample bar plots. |
-| `--comparative-plots` | Generate comparative plots per column showing all subsamples (and, when synthesizers are enabled, also synthetic variants). Categorical columns use percentage bar charts; numerical columns use box plots. |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `no_plots` | `--no-plots` | Skip per-subsample bar plots. |
+| `comparative_plots` | `--comparative-plots` | Generate comparative plots per column showing all subsamples (and, when synthesizers are enabled, also synthetic variants). Categorical columns use percentage bar charts; numerical columns use box plots. |
 
 ### Synthesizer training and synthetic data
 
-| Option | Description |
-|--------|-------------|
-| `--train-synthesizer {gaussian_copula,ctgan,tvae}` | Enable SDV single-table synthesizer training for each subsample. |
-| `--save-synthetic` | Save generated synthetic datasets as CSV files under `output/synthetic/<dataset>/<synthesizer>/`. |
-| `--synthesizer-epochs` | Training epochs for CTGAN/TVAE (ignored for GaussianCopula). |
-| `--eval-k-runs K` | Train the synthesizer K times per subsample, producing K synthetic datasets (`*_synthetic_run0.csv`, `run1.csv`, …). All evaluation metrics aggregate scores across these runs (mean±std). |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `train_synthesizer` | `--train-synthesizer` | Enable SDV single-table synthesizer training. Choices: `gaussian_copula`, `ctgan`, `tvae`. |
+| `save_synthetic` | `--save-synthetic` | Save generated synthetic datasets as CSV files under `output/synthetic/<dataset>/<synthesizer>/`. |
+| `synthesizer_epochs` | `--synthesizer-epochs` | Training epochs for CTGAN/TVAE (ignored for GaussianCopula). |
+| `eval_k_runs` | `--eval-k-runs` | Train the synthesizer K times per subsample, producing K synthetic datasets. All evaluation metrics aggregate scores across these runs (mean±std). |
 
 ### Real vs synthetic distribution plots
 
-| Option | Description |
-|--------|-------------|
-| `--eval-visualizations` | Generate column-wise real vs synthetic distribution plots for each subsample under `eval_plots/`. For categorical columns, synthetic bars can include mean±std across K runs; for numerical columns, KDE plots compare real vs synthetic densities. |
-| `--eval-plot-format {pdf,png}` | File format for evaluation plots (default: `pdf`). |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `eval_visualizations` | `--eval-visualizations` | Generate column-wise real vs synthetic distribution plots for each subsample under `eval_plots/`. |
+| `eval_plot_format` | `--eval-plot-format` | File format for evaluation plots: `pdf` or `png` (default: `pdf`). |
 
 ### ML augmentation evaluation
 
 These metrics answer: **if we augment the real training data with synthetic data, how well do downstream models perform on real held-out test data?**
 
-| Option | Description |
-|--------|-------------|
-| `--eval-ml-augmentation` | Enable ML augmentation evaluation. For categorical targets, runs **BinaryClassifierPrecisionEfficacy** and **BinaryClassifierRecallEfficacy**; for numerical targets, runs **LinearRegression** and **MLPRegressor** ML efficacy metrics. |
-| `--prediction-column COL` | Target column name. Defaults to `--stratify-column`. |
-| `--minority-class-label VALUE` | Required for **categorical** targets with `--eval-ml-augmentation`; defines the positive/minority class (e.g. `>50K`). Not required when the prediction column is numerical (regression metrics are used). |
-| `--ml-label-encode` | Label-encode categorical features to integers prior to ML evaluation. This avoids XGBoost `enable_categorical` issues when there are many categorical columns. |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `eval_ml_augmentation` | `--eval-ml-augmentation` | Enable ML augmentation evaluation. For categorical targets, runs **BinaryClassifierPrecisionEfficacy** and **BinaryClassifierRecallEfficacy**; for numerical targets, runs **LinearRegression** and **MLPRegressor** ML efficacy metrics. |
+| `prediction_column` | `--prediction-column` | Target column name. Defaults to `stratify_column`. |
+| `minority_class_label` | `--minority-class-label` | Required for **categorical** targets; defines the positive/minority class (e.g. `">50K"`). Not required when the prediction column is numerical. |
+| `ml_label_encode` | `--ml-label-encode` | Label-encode categorical features to integers prior to ML evaluation. Avoids XGBoost `enable_categorical` issues with many categorical columns. |
+| `eval_ml_max_epochs` | `--eval-ml-max-epochs` | Max estimators/epochs for XGBoost in ML augmentation evaluation. |
 
 ML augmentation outputs are saved to `ml_augmentation_eval.json` (see **Output Structure** below).
 
 ### Privacy evaluation
 
-| Option | Description |
-|--------|-------------|
-| `--eval-privacy` | Enable privacy evaluation across synthetic datasets using SDMetrics. Computes **DCRBaselineProtection** and **DCROverfittingProtection** (when test/validation data is available). |
-| `--eval-privacy-subsample N` | Optionally subsample N rows when computing DCR metrics, to speed up evaluation on large datasets. |
-| `--eval-privacy-disclosure` | Additionally compute **DisclosureProtection**, which estimates how well an attacker could infer sensitive attributes from known attributes. |
-| `--eval-privacy-disclosure-known COL1,COL2,...` | Comma-separated list of attacker-known columns for DisclosureProtection (e.g. demographics). |
-| `--eval-privacy-disclosure-sensitive COL1,COL2,...` | Comma-separated list of sensitive target columns for DisclosureProtection (e.g. disease status). |
-| `--eval-privacy-disclosure-continuous COL1,COL2,...` | Optional list of continuous columns that should be discretized for DisclosureProtection. |
-| `--eval-privacy-disclosure-computation {cap,generalized_cap,zero_cap}` | CAP computation method for DisclosureProtection (default: `cap`). |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `eval_privacy` | `--eval-privacy` | Enable privacy evaluation across synthetic datasets using SDMetrics. Computes **DCRBaselineProtection** and **DCROverfittingProtection**. |
+| `eval_privacy_subsample` | `--eval-privacy-subsample` | Optionally subsample N rows when computing DCR metrics, to speed up evaluation on large datasets. |
+| `eval_privacy_disclosure` | `--eval-privacy-disclosure` | Additionally compute **DisclosureProtection**, which estimates how well an attacker could infer sensitive attributes from known attributes. |
+| `eval_privacy_disclosure_known` | `--eval-privacy-disclosure-known` | Comma-separated list of attacker-known columns (e.g. `"Age,Sex"`). |
+| `eval_privacy_disclosure_sensitive` | `--eval-privacy-disclosure-sensitive` | Comma-separated list of sensitive target columns (e.g. `"Disease"`). |
+| `eval_privacy_disclosure_continuous` | `--eval-privacy-disclosure-continuous` | Optional list of continuous columns that should be discretized for DisclosureProtection. |
+| `eval_privacy_disclosure_computation` | `--eval-privacy-disclosure-computation` | CAP computation method: `cap`, `generalized_cap`, or `zero_cap` (default: `cap`). |
 
 Privacy outputs are saved to `privacy_eval.json` (see **Output Structure** below).
 
 ### Quality evaluation (statistical similarity)
 
-| Option | Description |
-|--------|-------------|
-| `--eval-quality` | Enable statistical quality metrics comparing real vs synthetic data. |
-| `--eval-quality-subsample N` | Optionally subsample N rows per evaluation to reduce runtime on large datasets. |
-| `--eval-quality-threshold FLOAT` | Real association threshold for **ContingencySimilarity**; only column pairs whose real association exceeds this threshold are included (others are set to NaN). Recommended values: `0.3` or higher. |
-| `--eval-quality-correlation-coefficient {Pearson,Spearman}` | Correlation coefficient used by **CorrelationSimilarity** for numerical pairs (default: `Pearson`). |
-| `--eval-quality-correlation-threshold FLOAT` | Real correlation threshold for **CorrelationSimilarity**; pairs with \|r\| below this threshold are ignored (set to NaN). Recommended values: `0.4` or higher. |
+| Key | CLI equivalent | Description |
+|-----|----------------|-------------|
+| `eval_quality` | `--eval-quality` | Enable statistical quality metrics comparing real vs synthetic data. |
+| `eval_quality_subsample` | `--eval-quality-subsample` | Optionally subsample N rows per evaluation to reduce runtime on large datasets. |
+| `eval_quality_threshold` | `--eval-quality-threshold` | Real association threshold for **ContingencySimilarity**; pairs below this threshold are set to NaN. Recommended: `0.3` or higher. |
+| `eval_quality_correlation_coefficient` | `--eval-quality-correlation-coefficient` | Correlation coefficient used by **CorrelationSimilarity**: `Pearson` or `Spearman` (default: `Pearson`). |
+| `eval_quality_correlation_threshold` | `--eval-quality-correlation-threshold` | Real correlation threshold for **CorrelationSimilarity**; pairs with \|r\| below this threshold are ignored. Recommended: `0.4` or higher. |
 
 Quality outputs are saved to `quality_eval.json` (see **Output Structure** below).
 
 ---
 
-## Shell Scripts: Use Cases
+## Provided Config Files: Use Cases
 
-Preconfigured shell scripts run `tabular_evaluation.py` with different datasets and settings. Edit the variables at the top of each script, then run:
-
-```bash
-./run_tabular_evaluation_cat_only.sh
-./run_tabular_evaluation_cat_only.sh
-./run_tabular_evaluation_num_only.sh
-./run_tabular_evaluation_cat_and_num.sh
-```
-
-### 1. `run_tabular_evaluation_cat_only.sh` — Categorical Medical/Health Data (`child` demo)
+### 1. `config_cat_only.yaml` — Categorical Medical/Health Data (`child` demo)
 
 | Setting | Value |
 |---------|-------|
@@ -246,23 +246,17 @@ Preconfigured shell scripts run `tabular_evaluation.py` with different datasets 
 | **Stratify** | `Disease` |
 | **Prediction** | `Sick` (binary: yes/no) |
 | **Minority class** | `yes` |
-| **Evaluations** | ML augmentation (binary classification), privacy (including DisclosureProtection), optional quality metrics |
+| **Evaluations** | ML augmentation (binary classification), privacy (including DisclosureProtection), quality |
 
-**Use case**: Datasets with mostly categorical columns and medical-style outcomes (e.g., diseases, diagnoses, yes/no flags). This script is configured to:
-
-- use the `child` demo as a proxy for pediatric/health datasets
-- evaluate ML augmentation performance on a binary outcome (`Sick`)
-- evaluate privacy, including DisclosureProtection with:
-  - attacker-known columns: `Disease`
-  - sensitive columns: `Age`
+**Use case**: Datasets with mostly categorical columns and medical-style outcomes (e.g., diseases, diagnoses, yes/no flags). Configured to evaluate ML augmentation performance on a binary outcome (`Sick`) and DisclosureProtection with attacker-known column `Disease` and sensitive column `Age`.
 
 ```bash
-./run_tabular_evaluation_cat_only.sh
+python tabular_evaluation.py --config config_cat_only.yaml
 ```
 
 ---
 
-### 2. `run_tabular_evaluation_num_only.sh` — News / Text-Derived Data (`news` demo)
+### 2. `config_num_only.yaml` — News / Text-Derived Data (`news` demo)
 
 | Setting | Value |
 |---------|-------|
@@ -270,17 +264,17 @@ Preconfigured shell scripts run `tabular_evaluation.py` with different datasets 
 | **Stratify** | `label` |
 | **Prediction** | `label` |
 | **Minority class** | `50000+` (adjust for your label semantics) |
-| **Evaluations** | ML augmentation (binary classification), privacy, optional quality metrics |
+| **Evaluations** | ML augmentation (binary classification), privacy, quality |
 
-**Use case**: Datasets from news or similar text-derived sources where the prediction target is a single categorical label column. Configure `MINORITY_CLASS` to match your positive class.
+**Use case**: Datasets from news or similar text-derived sources where the prediction target is a single categorical label column. Adjust `minority_class_label` in the config to match your positive class.
 
 ```bash
-./run_tabular_evaluation_num_only.sh
+python tabular_evaluation.py --config config_num_only.yaml
 ```
 
 ---
 
-### 3. `run_tabular_evaluation_cat_and_num.sh` — Adult / Mixed Categorical + Numerical (`adult` demo)
+### 3. `config_cat_and_num.yaml` — Adult / Mixed Categorical + Numerical (`adult` demo)
 
 | Setting | Value |
 |---------|-------|
@@ -288,13 +282,38 @@ Preconfigured shell scripts run `tabular_evaluation.py` with different datasets 
 | **Stratify** | `label` (income) |
 | **Prediction** | `label` |
 | **Minority class** | `>50K` |
-| **ML label encode** | `--ml-label-encode` ✅ |
-| **Evaluations** | ML augmentation (binary classification), privacy, optional quality metrics |
+| **ML label encode** | `true` |
+| **Evaluations** | ML augmentation (binary classification), privacy, quality |
 
-**Use case**: Datasets with both categorical and numerical features (e.g., Adult income: age, education, occupation, etc.). Uses `--ml-label-encode` for high-cardinality categoricals to ensure reliable ML augmentation evaluation.
+**Use case**: Datasets with both categorical and numerical features (e.g., Adult income: age, education, occupation, etc.). Uses `ml_label_encode: true` for high-cardinality categoricals to ensure reliable ML augmentation evaluation.
 
 ```bash
-./run_tabular_evaluation_cat_and_num.sh
+python tabular_evaluation.py --config config_cat_and_num.yaml
+```
+
+---
+
+## Custom Data
+
+To use your own CSV, copy the closest config file and edit the data source section:
+
+```yaml
+# Replace the sdv_demo block:
+# sdv_demo: true
+# sdv_modality: "single_table"
+# sdv_dataset: "adult"
+
+# With:
+data_path: "/path/to/your/data.csv"
+stratify_column: "your_target_column"
+prediction_column: "your_target_column"
+minority_class_label: "your_positive_class"   # for categorical targets
+```
+
+For datasets with many categorical columns, set `ml_label_encode: true` to avoid XGBoost encoding errors.
+
+```bash
+python tabular_evaluation.py --config my_custom_config.yaml
 ```
 
 ---
@@ -310,7 +329,7 @@ output/
 │   ├── subsample_200.csv
 ├── plots/
 │   └── <dataset>/
-│       ├── subsample_*.png       # Bar plots per subsample (if not --no-plots)
+│       ├── subsample_*.png       # Bar plots per subsample (unless no_plots: true)
 │       └── comparative/          # Comparative plots per column across subsamples (and optionally synthetic)
 │           └── *.png
 └── synthetic/<dataset>/<synthesizer>/
@@ -318,12 +337,12 @@ output/
     ├── subsample_*_synthetic_run1.csv
     ├── subsample_*_synthetic_run*.csv
     ├── subsample_*_metadata.json
-    ├── eval_plots/               # Real vs synthetic plots (if --eval-visualizations)
+    ├── eval_plots/               # Real vs synthetic plots (if eval_visualizations: true)
     │   └── subsample_*/
     │       └── column_*.pdf/.png
-    ├── ml_augmentation_eval.json # If --eval-ml-augmentation
-    ├── privacy_eval.json         # If --eval-privacy
-    └── quality_eval.json         # If --eval-quality
+    ├── ml_augmentation_eval.json # If eval_ml_augmentation: true
+    ├── privacy_eval.json         # If eval_privacy: true
+    └── quality_eval.json         # If eval_quality: true
 ```
 
 ### JSON output files
@@ -356,28 +375,14 @@ output/
 
 ---
 
-## Custom Data
+## Quick Reference: Which Config to Use?
 
-To use your own CSV instead of an SDV demo:
-
-1. Edit the script and set:
-   ```bash
-   DATA_SOURCE="--data-path /path/to/your/data.csv"
-   # DATA_SOURCE="--sdv-demo"   # comment out
-   ```
-2. Set `STRATIFY_COLUMN`, `PREDICTION_COLUMN`, and `MINORITY_CLASS` to match your schema.
-3. For many categorical columns, add `ML_LABEL_ENCODE="--ml-label-encode"`.
-
----
-
-## Quick Reference: Which Script to Use?
-
-| Your data type | Script |
-|----------------|--------|
-| Medical/health, mostly categoricals | `run_tabular_evaluation_cat_only.sh` |
-| News/text-derived, single label | `run_tabular_evaluation_num_only.sh` |
-| Census-/Adult-like, many categoricals + numeric | `run_tabular_evaluation_cat_and_num.sh` |
-| Custom CSV | Copy any script, switch to `--data-path` |
+| Your data type | Config file |
+|----------------|-------------|
+| Medical/health, mostly categoricals | `config_cat_only.yaml` |
+| News/text-derived, single label | `config_num_only.yaml` |
+| Census-/Adult-like, many categoricals + numeric | `config_cat_and_num.yaml` |
+| Custom CSV | Copy any config above, set `data_path` |
 
 ---
 
