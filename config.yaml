@@ -1,0 +1,77 @@
+# tabular_evaluation configuration
+# Pass this file with: python tabular_evaluation.py --config config.yaml
+# CLI arguments always override values set here.
+
+# ---------------------------------------------------------------------------
+# Data source (exactly one of data_path or sdv_demo must be set)
+# ---------------------------------------------------------------------------
+# data_path: "data/my_dataset.csv"   # path to a CSV or Excel file
+
+sdv_demo: true                        # use an SDV built-in demo dataset
+sdv_modality: "single_table"
+sdv_dataset: "child"
+
+# ---------------------------------------------------------------------------
+# Stratification & split
+# ---------------------------------------------------------------------------
+stratify_column: "Disease"
+test_size: 1000
+subsample_sizes: "1000,800,600,400,200"
+random_state: 42
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output_dir: "output"
+save_datasets: false
+no_plots: false
+comparative_plots: false
+
+# ---------------------------------------------------------------------------
+# Synthesizer training
+# Choices: gaussian_copula | ctgan | tvae  (comment out to disable)
+# ---------------------------------------------------------------------------
+# train_synthesizer: "gaussian_copula"
+save_synthetic: false
+synthesizer_epochs: 100
+
+# ---------------------------------------------------------------------------
+# Evaluation: distribution visualizations
+# ---------------------------------------------------------------------------
+eval_visualizations: false
+eval_plot_format: "pdf"   # pdf | png
+
+# ---------------------------------------------------------------------------
+# Evaluation: ML augmentation
+# ---------------------------------------------------------------------------
+eval_ml_augmentation: false
+eval_k_runs: 1
+# prediction_column: "Disease"       # defaults to stratify_column when omitted
+# minority_class_label: "Fallot"
+ml_label_encode: false
+# eval_ml_max_epochs: 100
+
+# ---------------------------------------------------------------------------
+# Evaluation: privacy
+# ---------------------------------------------------------------------------
+eval_privacy: false
+# eval_privacy_subsample: 5000
+eval_privacy_disclosure: false
+# eval_privacy_disclosure_known: "Age,Sex"
+# eval_privacy_disclosure_sensitive: "Disease"
+# eval_privacy_disclosure_continuous: "Age"
+eval_privacy_disclosure_computation: "cap"   # cap | generalized_cap | zero_cap
+
+# ---------------------------------------------------------------------------
+# Evaluation: quality
+# ---------------------------------------------------------------------------
+eval_quality: false
+# eval_quality_subsample: 5000
+# eval_quality_threshold: 0.3
+eval_quality_correlation_coefficient: "Pearson"   # Pearson | Spearman
+# eval_quality_correlation_threshold: 0.4
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+quiet: false
